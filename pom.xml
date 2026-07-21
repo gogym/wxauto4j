@@ -9,13 +9,14 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.source>11</maven.compiler.source>
-    <maven.compiler.target>11</maven.compiler.target>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <javafx.version>21.0.2</javafx.version>
   </properties>
 
   <modules>
     <module>wxauto4j-lib</module>
-    <module>wxauto4j-app</module>
+    <module>wxauto4j-gui-win</module>
   </modules>
 
   <dependencyManagement>
@@ -29,6 +30,16 @@
         <groupId>com.gettyio.gim</groupId>
         <artifactId>wxauto4j-lib</artifactId>
         <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-controls</artifactId>
+        <version>${javafx.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-fxml</artifactId>
+        <version>${javafx.version}</version>
       </dependency>
       <dependency>
         <groupId>junit</groupId>

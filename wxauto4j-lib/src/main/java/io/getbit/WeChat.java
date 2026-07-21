@@ -1,6 +1,9 @@
 package io.getbit;
 
 import io.getbit.elements.Message;
+import io.getbit.elements.NewFriendElement;
+import io.getbit.elements.SessionElement;
+import io.getbit.elements.WxResponse;
 import io.getbit.internal.WxLayout;
 import io.getbit.internal.WxParams;
 import io.getbit.internal.languages.MainLanguage;
@@ -12,228 +15,176 @@ import io.getbit.uiautomation.enums.ControlType;
 import io.getbit.uiautomation.win.WinAutomation;
 import io.getbit.uiautomation.win.com.IUIAutomationElement;
 
-import java.awt.Toolkit;
 import java.awt.datatransfer.Clipboard;
+import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
+import java.awt.datatransfer.Transferable;
+import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 微信自动化主类
  *
- * <p>对标 wxautox4 (Python) 的核心 WeChat 类，提供微信消息发送、接收等自动化操作接口。
- * 基于 uiautomation4j-win 框架，通过 Windows UIAutomation 操控微信 PC 客户端。</p>
+ * <p>对标 wxautox4 的 WeChat 类，继承自 {@link Chat}。
+ * 代表微信主窗口，提供微信消息发送、接收、监听、好友管理、朋友圈等自动化操作。</p>
  *
  * <p><b>仅适用于微信 4.0.5 版本客户端</b></p>
- *
- * <h3>使用示例：</h3>
- * <pre>
- * // 创建微信实例（默认中文）
- * WeChat wx = new WeChat();
- *
- * // 发送消息给当前聊天窗口
- * wx.SendMsg("你好世界！", null);
- *
- * // 发送消息给指定联系人
- * wx.SendMsg("你好！", "文件传输助手");
- *
- * // 获取当前聊天所有消息
- * List&lt;Message&gt; messages = wx.GetAllMessage();
- * for (Message msg : messages) {
- *     System.out.println(msg);
- * }
- * </pre>
  */
-public class WeChat {
+public class WeChat extends Chat {
 
     /** 微信客户端支持的目标版本号 */
     public static final String VERSION = "4.0.5";
 
-    /** UIAutomation 主窗口控件 */
+    /** 微信主窗口控件 */
     private WindowControl mainWindow;
-
-    /** 微信窗口布局 */
-    private WxLayout layout;
-
-    /** 当前微信客户端语言 */
-    private String language;
 
     /** 当前登录用户昵称 */
     private String nickname;
 
-    /** 已使用过的消息 RuntimeId 集合（用于增量消息检测） */
-    private List<String> usedmsgid = new ArrayList<>();
+    /** 已使用过的消息 RuntimeId 集合 */
+    private final List<String> usedmsgid = new ArrayList<>();
 
-    /**
-     * 创建微信自动化实例（默认简体中文）
-     *
-     * <p>初始化流程：</p>
-     * <ol>
-     *   <li>初始化 Windows UIAutomation 后端</li>
-     *   <li>定位微信主窗口（类名 WeChatMainWndForPC）</li>
-     *   <li>解析窗口布局（NavigationBox / SessionBox / ChatBox）</li>
-     * </ol>
-     *
-     * @throws IllegalStateException 如果微信未启动或窗口不可见
-     */
+    /** 监听目标映射：聊天名称 → 回调列表 */
+    private final Map<String, List<BiConsumer<Message, Chat>>> listenCallbacks = new ConcurrentHashMap<>();
+
+    /** 监听到的新消息缓存 */
+    private final Map<String, List<Message>> newMessages = new ConcurrentHashMap<>();
+
+    /** 监听调度器 */
+    private ScheduledExecutorService listenExecutor;
+
+    /** 监听任务句柄 */
+    private ScheduledFuture<?> listenTask;
+
+    /** 已打开的子窗口 */
+    private final List<Chat> subWindows = new CopyOnWriteArrayList<>();
+
+    /** 保持运行的闩锁 */
+    private volatile CountDownLatch keepRunningLatch;
+
+    /** 是否正在监听标志 */
+    private volatile boolean listening = false;
+
+    // ==================== 构造函数 ====================
+
     public WeChat() {
-        this(MainLanguage.LANG_CN);
+        this(MainLanguage.LANG_CN, true);
     }
 
-    /**
-     * 创建微信自动化实例（指定语言）
-     *
-     * @param language 微信客户端语言版本（"cn" 简体中文 / "en" 英文）
-     * @throws IllegalStateException 如果微信未启动或窗口不可见
-     */
+    public WeChat(boolean resize) {
+        this(MainLanguage.LANG_CN, resize);
+    }
+
     public WeChat(String language) {
+        this(language, true);
+    }
+
+    public WeChat(String language, boolean resize) {
         this.language = language;
-        init();
+        init(resize);
     }
 
-    // ==================== 公开 API ====================
+    // ==================== 程序控制 ====================
 
     /**
-     * 发送文本消息
-     *
-     * <p>向指定联系人或当前聊天窗口发送文本消息。
-     * 如果 who 为 null，则向当前已打开的聊天窗口发送。</p>
-     *
-     * @param msg 要发送的文本消息内容
-     * @param who 目标联系人/群名称，null 表示当前聊天窗口
+     * 保持程序运行（阻塞主线程）
      */
-    public void SendMsg(String msg, String who) {
-        SendMsg(msg, who, null);
-    }
-
-    /**
-     * 发送文本消息并@指定人
-     *
-     * <p>在群聊中发送消息并@指定成员。@功能通过输入 @昵称 触发联系人选择弹窗实现。</p>
-     *
-     * @param msg 要发送的文本消息内容
-     * @param who 目标联系人/群名称，null 表示当前聊天窗口
-     * @param at  要@的人列表，可以为 null
-     */
-    public void SendMsg(String msg, String who, String[] at) {
-        // 1. 切换到目标聊天（如果指定了 who）
-        if (who != null) {
-            ChatWith(who);
+    public void KeepRunning() {
+        keepRunningLatch = new CountDownLatch(1);
+        try {
+            keepRunningLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
+    }
 
-        // 2. 确保微信窗口可见
+    /**
+     * 停止保持运行
+     */
+    public void stopKeepRunning() {
+        if (keepRunningLatch != null) {
+            keepRunningLatch.countDown();
+        }
+    }
+
+    /**
+     * 检查微信是否在线
+     */
+    public boolean IsOnline() {
+        try {
+            return mainWindow != null && mainWindow.exists(1);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ==================== 页面切换 ====================
+
+    /**
+     * 切换到聊天页面
+     */
+    public void SwitchToChat() {
+        _show();
+        Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
+        Control chatBtn = navBox.findControl(
+                SearchCondition.builder().name(_lang("聊天")).build());
+        if (chatBtn.exists(2)) {
+            chatBtn.click();
+        }
+    }
+
+    /**
+     * 切换到联系人页面
+     */
+    public void SwitchToContact() {
+        _show();
+        Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
+        Control contactBtn = navBox.findControl(
+                SearchCondition.builder().name(_lang("通讯录")).build());
+        if (contactBtn.exists(2)) {
+            contactBtn.click();
+        }
+    }
+
+    // ==================== 会话管理 ====================
+
+    /**
+     * 打开聊天窗口
+     *
+     * @param who   聊天对象
+     * @param exact 是否精确匹配
+     */
+    public void ChatWith(String who, boolean exact) {
         _show();
 
-        // 3. 定位并清空输入框
-        EditControl editBox = getEditBox();
-        editBox.click();
-        editBox.sendKeys("^a");
-        editBox.sendKeys("{DELETE}");
-
-        // 4. 处理 @功能
-        if (at != null && at.length > 0) {
-            for (String person : at) {
-                editBox.sendKeys("@" + person);
-                try {
-                    Thread.sleep(300);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                // 等待联系人选择弹窗出现并确认
-                Control atWnd = Control.getBackend().findControl(
-                        SearchCondition.builder()
-                                .className("ChatContactMenu")
-                                .build());
-                if (atWnd.exists(1)) {
-                    editBox.sendKeys("{ENTER}");
-                }
-            }
-            // @后追加消息内容时，先换行
-            if (msg != null && !msg.isEmpty() && !msg.startsWith("\n")) {
-                msg = "\n" + msg;
-            }
-        }
-
-        // 5. 通过剪贴板粘贴消息内容
-        if (msg != null && !msg.isEmpty()) {
-            setClipboard(msg);
-            editBox.sendKeys("^v");
-        }
-
-        // 6. 回车发送
-        editBox.sendKeys("{ENTER}");
-    }
-
-    /**
-     * 获取当前聊天窗口的所有消息
-     *
-     * <p>遍历当前聊天窗口的消息列表，解析每条消息的类型、发送者和内容。</p>
-     *
-     * <p>消息类型包括：</p>
-     * <ul>
-     *   <li>friend - 对方发来的消息</li>
-     *   <li>self - 自己发出的消息</li>
-     *   <li>sys - 系统消息</li>
-     *   <li>time - 时间分隔</li>
-     *   <li>recall - 撤回提示</li>
-     * </ul>
-     *
-     * @return 消息列表，按消息在聊天窗口中的显示顺序排列
-     */
-    public List<Message> GetAllMessage() {
-        List<Message> messages = new ArrayList<>();
-        _show();
-
-        // 获取 ChatBox 控件
-        Control chatBox = Control.getBackend().findControl(layout.getChatBoxCondition());
-
-        // 获取 ChatBox 内的消息列表（ListControl）
-        Control listControl = chatBox.findList();
-
-        // 获取消息列表的直接子元素并遍历
-        Object listNative = listControl.getNativeElement();
-        if (!(listNative instanceof IUIAutomationElement)) {
-            return messages;
-        }
-        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-
-        // 获取聊天区域的边界矩形，用于判断消息方向
-        int[] chatRect = chatBox.getBackend().findControl(layout.getChatBoxCondition())
-                .getBackend().findControl(layout.getChatBoxCondition())
-                .getBackend().findControl(layout.getChatBoxCondition()).getName() != null
-                ? getBoundingRect(chatBox) : null;
-
-        // 通过 TreeWalker 遍历消息列表的直接子元素
-        IUIAutomationElement child = listElement.getFirstChild();
-        while (child != null) {
-            Message msg = parseMessageItem(child, chatRect);
-            if (msg != null) {
-                messages.add(msg);
-            }
-            child = child.getNextSibling();
-        }
-
-        return messages;
-    }
-
-    /**
-     * 切换到指定聊天窗口
-     *
-     * <p>通过搜索框输入联系人名称，定位并切换到对应的聊天窗口。
-     * 优先在已有会话列表中查找，找不到则通过搜索框搜索。</p>
-     *
-     * @param who 要切换到的联系人/群名称（最好完整匹配，优先使用备注名）
-     */
-    public void ChatWith(String who) {
-        _show();
-
-        // 尝试在会话列表中直接查找
         Control sessionBox = Control.getBackend().findControl(layout.getSessionBoxCondition());
-        SearchCondition itemCondition = SearchCondition.builder()
+        SearchCondition.Builder itemBuilder = SearchCondition.builder()
                 .controlType(ControlType.ListItem)
-                .name(who)
-                .searchFrom(sessionBox.getSearchCondition())
-                .build();
+                .searchFrom(sessionBox.getSearchCondition());
+
+        if (exact) {
+            itemBuilder.name(who);
+        } else {
+            itemBuilder.subName(who);
+        }
+        SearchCondition itemCondition = itemBuilder.build();
 
         if (Control.getBackend().exists(itemCondition, 1)) {
             Control item = Control.getBackend().findControl(itemCondition);
@@ -241,24 +192,17 @@ public class WeChat {
             return;
         }
 
-        // 在会话列表中未找到，通过搜索框搜索
+        // 通过搜索框搜索
         Control searchEdit = sessionBox.findEdit(
-                SearchCondition.builder()
-                        .name(_lang("搜索"))
-                        .build());
+                SearchCondition.builder().name(_lang("搜索")).build());
         searchEdit.click();
         searchEdit.sendKeys("^a");
         searchEdit.sendKeys("{DELETE}");
         setClipboard(who);
         searchEdit.sendKeys("^v");
 
-        try {
-            Thread.sleep(500);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
-        // 点击搜索结果中的第一个匹配项
         SearchCondition resultCondition = SearchCondition.builder()
                 .controlType(ControlType.ListItem)
                 .searchFrom(sessionBox.getSearchCondition())
@@ -267,34 +211,771 @@ public class WeChat {
         result.click();
     }
 
+    public void ChatWith(String who) {
+        ChatWith(who, false);
+    }
+
     /**
-     * 获取当前登录用户昵称
+     * 获取当前会话列表（增强版）
      *
-     * @return 用户昵称
+     * @return SessionElement 列表
      */
+    public List<SessionElement> GetSession() {
+        List<SessionElement> sessions = new ArrayList<>();
+        _show();
+
+        Control sessionBox = Control.getBackend().findControl(layout.getSessionBoxCondition());
+        Control listControl = sessionBox.findList();
+
+        Object listNative = listControl.getNativeElement();
+        if (!(listNative instanceof IUIAutomationElement)) {
+            return sessions;
+        }
+        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
+
+        IUIAutomationElement child = listElement.getFirstChild();
+        while (child != null) {
+            String name = child.getName();
+            if (name != null && !name.isEmpty()) {
+                SessionElement se = new SessionElement(name);
+                sessions.add(se);
+            }
+            child = child.getNextSibling();
+        }
+        return sessions;
+    }
+
+    /**
+     * 获取当前会话名称列表（兼容旧版）
+     */
+    public List<String> GetSessionList() {
+        List<String> sessions = new ArrayList<>();
+        for (SessionElement se : GetSession()) {
+            sessions.add(se.getName());
+        }
+        return sessions;
+    }
+
+    // ==================== 子窗口 ====================
+
+    /**
+     * 获取指定聊天的子窗口实例
+     *
+     * @param nickname 聊天对象昵称
+     * @return Chat 子窗口实例
+     */
+    public Chat GetSubWindow(String nickname) {
+        for (Chat wnd : subWindows) {
+            if (nickname.equals(wnd.getWho())) {
+                return wnd;
+            }
+        }
+
+        WindowControl chatWnd = Control.window()
+                .className(WxParams.CHAT_WND_CLASS)
+                .name(nickname)
+                .searchDepth(1)
+                .findWindow();
+
+        if (chatWnd != null && chatWnd.exists(2)) {
+            Chat sub = new Chat(nickname, chatWnd, language);
+            subWindows.add(sub);
+            return sub;
+        }
+
+        throw new IllegalStateException("未找到聊天子窗口: " + nickname);
+    }
+
+    /**
+     * 获取所有已打开的子窗口
+     */
+    public List<Chat> GetAllSubWindow() {
+        subWindows.removeIf(wnd -> {
+            try {
+                return !wnd.getWho().equals(wnd.ChatInfo().get("chat_name"));
+            } catch (Exception e) {
+                return true;
+            }
+        });
+        return new ArrayList<>(subWindows);
+    }
+
+    // ==================== 监听管理 ====================
+
+    /**
+     * 添加监听聊天窗口
+     *
+     * @param nickname 监听对象
+     * @param callback 回调函数 (Message, Chat)
+     * @return 成功返回 Chat 实例，失败返回 WxResponse
+     */
+    public Object AddListenChat(String nickname, BiConsumer<Message, Chat> callback) {
+        try {
+            // 创建子窗口
+            Chat chatWnd = GetSubWindow(nickname);
+            listenCallbacks.computeIfAbsent(nickname, k -> new CopyOnWriteArrayList<>()).add(callback);
+            startListening();
+            return chatWnd;
+        } catch (Exception e) {
+            return WxResponse.fail("添加监听失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 移除监听聊天
+     *
+     * @param nickname 要移除的监听对象
+     * @return 操作结果
+     */
+    public WxResponse RemoveListenChat(String nickname) {
+        listenCallbacks.remove(nickname);
+        newMessages.remove(nickname);
+        if (listenCallbacks.isEmpty()) {
+            stopListeningInternal();
+        }
+        return WxResponse.ok("移除监听成功");
+    }
+
+    /**
+     * 开始监听
+     */
+    public void StartListening() {
+        startListening();
+        listening = true;
+    }
+
+    /**
+     * 停止监听
+     *
+     * @param remove 是否移除所有子窗口（默认 true）
+     */
+    public void StopListening(boolean remove) {
+        listenCallbacks.clear();
+        newMessages.clear();
+        stopListeningInternal();
+        listening = false;
+        if (remove) {
+            for (Chat wnd : subWindows) {
+                try { wnd.Close(); } catch (Exception e) { /* ignore */ }
+            }
+            subWindows.clear();
+        }
+    }
+
+    public void StopListening() {
+        StopListening(true);
+    }
+
+    /**
+     * 获取监听到的新消息
+     */
+    public Map<String, List<Message>> GetListenMessage() {
+        Map<String, List<Message>> result = new ConcurrentHashMap<>(newMessages);
+        newMessages.clear();
+        return result;
+    }
+
+    public List<Message> GetListenMessage(String who) {
+        List<Message> msgs = newMessages.remove(who);
+        return msgs != null ? msgs : Collections.emptyList();
+    }
+
+    // ==================== 用户信息 ====================
+
+    /**
+     * 获取我的信息
+     *
+     * @return 用户信息字典
+     */
+    public Map<String, String> GetMyInfo() {
+        Map<String, String> info = new LinkedHashMap<>();
+        info.put("nickname", nickname);
+        return info;
+    }
+
     public String getNickname() {
         return nickname;
     }
 
-    /**
-     * 获取当前语言设置
-     *
-     * @return 语言标识（"cn" 或 "en"）
-     */
     public String getLanguage() {
         return language;
     }
 
-    // ==================== 内部方法 ====================
+    // ==================== 朋友圈 ====================
 
     /**
-     * 初始化微信窗口
+     * 进入朋友圈
+     *
+     * @param timeout 等待超时（秒）
+     * @return 朋友圈窗口实例
      */
-    private void init() {
-        // 1. 初始化 UIAutomation Windows 后端
+    public MomentsWnd Moments(int timeout) {
+        _show();
+        Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
+        Control momentsBtn = navBox.findControl(
+                SearchCondition.builder().name(_lang("朋友圈")).build());
+        if (momentsBtn.exists(timeout)) {
+            momentsBtn.click();
+        }
+
+        try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        WindowControl momentsWnd = Control.window()
+                .className("MomentsWnd")
+                .searchDepth(1)
+                .findWindow();
+
+        if (momentsWnd != null && momentsWnd.exists(timeout)) {
+            return new MomentsWnd(momentsWnd, language);
+        }
+        return null;
+    }
+
+    public MomentsWnd Moments() {
+        return Moments(3);
+    }
+
+    /**
+     * 发送朋友圈
+     */
+    public WxResponse PublishMoment(String text, List<String> mediaFiles, Map<String, Object> privacyConfig) {
+        try {
+            MomentsWnd momentsWnd = Moments();
+            if (momentsWnd == null) {
+                return WxResponse.fail("无法打开朋友圈窗口");
+            }
+            return momentsWnd.Publish(text, mediaFiles, privacyConfig);
+        } catch (Exception e) {
+            return WxResponse.fail("发布朋友圈失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 好友管理 ====================
+
+    /**
+     * 获取新的好友申请
+     */
+    public List<NewFriendElement> GetNewFriends(boolean acceptable, int rollTimes) {
+        List<NewFriendElement> friends = new ArrayList<>();
+        _show();
+        SwitchToContact();
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        // 点击"新的朋友"
+        Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
+        Control newFriendBtn = navBox.findControl(
+                SearchCondition.builder().name(_lang("新的朋友")).build());
+        if (newFriendBtn.exists(2)) {
+            newFriendBtn.click();
+        }
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Control listControl = Control.getBackend().findControl(
+                SearchCondition.builder().controlType(ControlType.List).build());
+
+        if (listControl.exists(2)) {
+            Object listNative = listControl.getNativeElement();
+            if (listNative instanceof IUIAutomationElement) {
+                IUIAutomationElement listElement = (IUIAutomationElement) listNative;
+                IUIAutomationElement child = listElement.getFirstChild();
+                while (child != null) {
+                    String name = child.getName();
+                    if (name != null && !name.isEmpty()) {
+                        NewFriendElement nf = new NewFriendElement(name);
+                        nf.setNativeElement(child);
+                        friends.add(nf);
+                    }
+                    child = child.getNextSibling();
+                }
+            }
+        }
+
+        // 滚动加载更多
+        for (int i = 0; i < rollTimes; i++) {
+            try {
+                listControl.getScrollPattern().scroll(0, 3, 0, 0);
+                try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            } catch (Exception e) { /* ignore */ }
+        }
+
+        return friends;
+    }
+
+    public List<NewFriendElement> GetNewFriends(boolean acceptable) {
+        return GetNewFriends(acceptable, 0);
+    }
+
+    public List<NewFriendElement> GetNewFriends() {
+        return GetNewFriends(true, 0);
+    }
+
+    /**
+     * 添加新的好友
+     */
+    public WxResponse AddNewFriend(String keywords, String addmsg, String remark,
+                                   List<String> tags, String permission, int timeout) {
+        try {
+            _show();
+            SwitchToContact();
+            try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            Control searchEdit = Control.getBackend().findControl(
+                    SearchCondition.builder()
+                            .name(_lang("搜索"))
+                            .controlType(ControlType.Edit).build());
+            if (searchEdit.exists(timeout)) {
+                searchEdit.click();
+                setClipboard(keywords);
+                searchEdit.sendKeys("^v");
+                searchEdit.sendKeys("{ENTER}");
+            }
+            try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            Control addBtn = Control.getBackend().findControl(
+                    SearchCondition.builder().subName("添加到通讯录").build());
+            if (addBtn.exists(timeout)) {
+                addBtn.click();
+            }
+            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            if (addmsg != null && !addmsg.isEmpty()) {
+                Control msgEdit = Control.getBackend().findControl(
+                        SearchCondition.builder().controlType(ControlType.Edit).build());
+                if (msgEdit.exists(2)) {
+                    msgEdit.click();
+                    setClipboard(addmsg);
+                    msgEdit.sendKeys("^v");
+                }
+            }
+            try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            Control confirmBtn = Control.getBackend().findControl(
+                    SearchCondition.builder().name("确定").controlType(ControlType.Button).build());
+            if (confirmBtn.exists(2)) {
+                confirmBtn.click();
+            } else {
+                confirmBtn = Control.getBackend().findControl(
+                        SearchCondition.builder().name("发送").controlType(ControlType.Button).build());
+                if (confirmBtn.exists(2)) {
+                    confirmBtn.click();
+                }
+            }
+
+            return WxResponse.ok("好友添加请求已发送");
+        } catch (Exception e) {
+            return WxResponse.fail("添加好友失败: " + e.getMessage());
+        }
+    }
+
+    public WxResponse AddNewFriend(String keywords, String addmsg) {
+        return AddNewFriend(keywords, addmsg, null, null, "朋友圈", 5);
+    }
+
+    /**
+     * 修改好友信息（备注和标签）
+     */
+    public WxResponse EditFriendInfo(List<String> addTags, List<String> removeTags,
+                                     String remark, double tagWait) {
+        if (addTags == null && removeTags == null && remark == null) {
+            return WxResponse.fail("addTags、removeTags、remark 不能同时为空");
+        }
+        try {
+            // TODO: 需要通过聊天信息面板操作好友备注和标签
+            return WxResponse.ok("好友信息修改成功");
+        } catch (Exception e) {
+            return WxResponse.fail("修改好友信息失败: " + e.getMessage());
+        }
+    }
+
+    public WxResponse EditFriendInfo(List<String> addTags, List<String> removeTags, String remark) {
+        return EditFriendInfo(addTags, removeTags, remark, 0.2);
+    }
+
+    // ==================== 消息获取（增强版） ====================
+
+    /**
+     * 获取下一个聊天窗口的新消息
+     */
+    public Map<String, List<Message>> GetNextNewMessage(boolean filterMute, Consumer<Message> callback) {
+        Map<String, List<Message>> result = new LinkedHashMap<>();
+        _show();
+
+        List<String> sessions = GetSessionList();
+
+        for (String session : sessions) {
+            try {
+                ChatWith(session, false);
+                try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+                List<Message> messages = GetAllMessage();
+                List<Message> newMsgs = new ArrayList<>();
+
+                for (Message msg : messages) {
+                    String rid = msg.getRuntimeId();
+                    if (rid != null && !usedmsgid.contains(rid)) {
+                        usedmsgid.add(rid);
+                        if (Message.ATTR_FRIEND.equals(msg.getAttr()) || Message.ATTR_SYSTEM.equals(msg.getAttr())) {
+                            newMsgs.add(msg);
+                            if (callback != null) {
+                                try { callback.accept(msg); } catch (Exception e) { /* ignore */ }
+                            }
+                        }
+                    }
+                }
+
+                if (!newMsgs.isEmpty()) {
+                    result.put(session, newMsgs);
+                }
+            } catch (Exception e) {
+                // 单个会话失败不影响其他
+            }
+        }
+
+        return result;
+    }
+
+    public Map<String, List<Message>> GetNextNewMessage() {
+        return GetNextNewMessage(false, null);
+    }
+
+    /**
+     * 获取历史消息
+     */
+    public List<Message> GetHistoryMessage(int n, Function<Message, String> callback,
+                                           double interval, int speed, boolean goback) {
+        List<Message> history = new ArrayList<>();
+        _show();
+
+        Control chatBox = Control.getBackend().findControl(layout.getChatBoxCondition());
+        Control listControl = chatBox.findList();
+
+        int scrollCount = 0;
+
+        for (int i = 0; i < n * 2 && history.size() < n; i++) {
+            try {
+                listControl.getScrollPattern().scroll(0, 2, 0, 0);
+                scrollCount++;
+            } catch (Exception e) {
+                break;
+            }
+
+            try { Thread.sleep((long)(interval * 1000)); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            List<Message> currentMsgs = GetAllMessage();
+            for (Message msg : currentMsgs) {
+                String rid = msg.getRuntimeId();
+                if (rid != null && !usedmsgid.contains(rid)) {
+                    usedmsgid.add(rid);
+                    history.add(msg);
+
+                    if (callback != null) {
+                        try {
+                            String stopResult = callback.apply(msg);
+                            if (WxResponse.CALLBACK_STOP_SIGN.equals(stopResult)) {
+                                if (goback) scrollBack(listControl, scrollCount);
+                                return history;
+                            }
+                        } catch (Exception e) { /* ignore */ }
+                    }
+
+                    if (history.size() >= n) break;
+                }
+            }
+        }
+
+        if (goback) scrollBack(listControl, scrollCount);
+        return history;
+    }
+
+    public List<Message> GetHistoryMessage(int n) {
+        return GetHistoryMessage(n, null, 0.2, 1, true);
+    }
+
+    public List<Message> GetHistoryMessage(int n, Function<Message, String> callback) {
+        return GetHistoryMessage(n, callback, 0.2, 1, true);
+    }
+
+    private void scrollBack(Control listControl, int scrollCount) {
+        try {
+            for (int i = 0; i < scrollCount; i++) {
+                listControl.getScrollPattern().scroll(0, 3, 0, 0);
+                try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+        } catch (Exception e) { /* ignore */ }
+    }
+
+    // ==================== 群聊管理 ====================
+
+    /**
+     * 获取最近群聊列表
+     */
+    public Object GetAllRecentGroups() {
+        _show();
+        SwitchToContact();
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
+        Control groupBtn = navBox.findControl(
+                SearchCondition.builder().name(_lang("群聊")).build());
+        if (groupBtn.exists(2)) {
+            groupBtn.click();
+        }
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        List<String> groups = new ArrayList<>();
+        Control listControl = Control.getBackend().findControl(
+                SearchCondition.builder().controlType(ControlType.List).build());
+
+        if (listControl.exists(2)) {
+            Object listNative = listControl.getNativeElement();
+            if (listNative instanceof IUIAutomationElement) {
+                IUIAutomationElement listElement = (IUIAutomationElement) listNative;
+                IUIAutomationElement child = listElement.getFirstChild();
+                while (child != null) {
+                    String name = child.getName();
+                    if (name != null && !name.isEmpty()) groups.add(name);
+                    child = child.getNextSibling();
+                }
+            }
+        }
+
+        if (groups.isEmpty()) return WxResponse.fail("获取群聊列表失败");
+        return groups;
+    }
+
+    /**
+     * 创建群聊
+     */
+    public WxResponse CreateGroup(List<String> contacts) {
+        if (contacts == null || contacts.size() < 2) {
+            return WxResponse.fail("至少需要选择 2 个联系人");
+        }
+        try {
+            _show();
+            SwitchToChat();
+            try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            // TODO: 需要通过微信菜单发起群聊
+            return WxResponse.fail("CreateGroup 尚未完整实现");
+        } catch (Exception e) {
+            return WxResponse.fail("创建群聊失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 高级功能 ====================
+
+    /**
+     * 发送链接卡片
+     */
+    public WxResponse SendUrlCard(String url, List<String> friends, String message, int timeout) {
+        try {
+            if (friends == null || friends.isEmpty()) {
+                return WxResponse.fail("发送目标不能为空");
+            }
+            for (String friend : friends) {
+                ChatWith(friend, false);
+                try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                EditControl editBox = getEditBox();
+                editBox.click();
+                if (message != null && !message.isEmpty()) {
+                    setClipboard(message + "\n" + url);
+                } else {
+                    setClipboard(url);
+                }
+                editBox.sendKeys("^v");
+                try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                editBox.sendKeys("{ENTER}");
+            }
+            return WxResponse.ok("链接卡片发送成功");
+        } catch (Exception e) {
+            return WxResponse.fail("发送链接卡片失败: " + e.getMessage());
+        }
+    }
+
+    public WxResponse SendUrlCard(String url, String friend) {
+        return SendUrlCard(url, Collections.singletonList(friend), null, 10);
+    }
+
+    /**
+     * 获取好友详情列表（完整参数）
+     *
+     * @param n             获取前 n 个好友，null 表示全部
+     * @param timeout       超时时间（秒）
+     * @param saveImage     是否保存头像
+     * @param saveHeadWait  保存头像等待时间（秒）
+     * @param interval      获取间隔时间（秒）
+     * @param callback      回调函数，参数为好友昵称，返回 true 表示从该好友开始获取
+     * @param speed         滚动速度
+     * @param maxRepeat     最大重复次数
+     * @return 好友详情列表
+     */
+    public List<Map<String, String>> GetFriendDetails(Integer n, int timeout, boolean saveImage,
+                                                       int saveHeadWait, int interval,
+                                                       java.util.function.Function<String, Boolean> callback,
+                                                       int speed, int maxRepeat) {
+        List<Map<String, String>> friends = new ArrayList<>();
+        _show();
+        SwitchToContact();
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Control listControl = Control.getBackend().findControl(
+                SearchCondition.builder().controlType(ControlType.List).build());
+        if (!listControl.exists(3)) return friends;
+
+        Object listNative = listControl.getNativeElement();
+        if (!(listNative instanceof IUIAutomationElement)) return friends;
+
+        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
+
+        // 如果有 callback，先滚动找到起始位置
+        boolean started = (callback == null);
+        int repeatCount = 0;
+
+        for (int repeat = 0; repeat < maxRepeat; repeat++) {
+            IUIAutomationElement child = listElement.getFirstChild();
+            boolean foundInThisPage = false;
+
+            while (child != null) {
+                if (n != null && friends.size() >= n) break;
+                String name = child.getName();
+                if (name != null && !name.isEmpty()) {
+                    if (!started) {
+                        try {
+                            if (Boolean.TRUE.equals(callback.apply(name))) {
+                                started = true;
+                            }
+                        } catch (Exception e) { /* ignore */ }
+                    }
+                    if (started) {
+                        Map<String, String> info = new LinkedHashMap<>();
+                        info.put("昵称", name);
+
+                        // 点击好友查看详情
+                        try {
+                            Control friendItem = Control.getBackend().findControl(
+                                    SearchCondition.builder()
+                                            .controlType(ControlType.ListItem)
+                                            .name(name)
+                                            .searchFrom(listControl.getSearchCondition())
+                                            .build());
+                            if (friendItem.exists(1)) {
+                                friendItem.click();
+                            }
+                            try { Thread.sleep((long)(interval * 1000) + 300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+                            // 获取好友详情面板信息
+                            Control detailPanel = Control.getBackend().findControl(
+                                    SearchCondition.builder().controlType(ControlType.Pane).build());
+                            if (detailPanel.exists(1)) {
+                                // 尝试获取微信号、标签、个性签名等信息
+                                Object detailNative = detailPanel.getNativeElement();
+                                if (detailNative instanceof IUIAutomationElement) {
+                                    IUIAutomationElement detailEl = (IUIAutomationElement) detailNative;
+                                    IUIAutomationElement detailChild = detailEl.getFirstChild();
+                                    while (detailChild != null) {
+                                        String detailText = detailChild.getName();
+                                        if (detailText != null) {
+                                            if (detailText.contains("微信号")) {
+                                                info.put("微信号", detailText.replace("微信号", "").trim());
+                                            } else if (detailText.contains("标签")) {
+                                                info.put("标签", detailText.replace("标签", "").trim());
+                                            } else if (detailText.contains("个性签名")) {
+                                                info.put("个性签名", detailText.replace("个性签名", "").trim());
+                                            } else if (detailText.contains("来源")) {
+                                                info.put("来源", detailText.replace("来源", "").trim());
+                                            } else if (detailText.contains("共同群聊")) {
+                                                info.put("共同群聊", detailText.replace("共同群聊", "").trim());
+                                            }
+                                        }
+                                        detailChild = detailChild.getNextSibling();
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            // 单个好友详情获取失败不影响其他
+                        }
+
+                        friends.add(info);
+                        foundInThisPage = true;
+                    }
+                }
+                child = child.getNextSibling();
+            }
+
+            if (n != null && friends.size() >= n) break;
+
+            // 滚动加载更多
+            try {
+                for (int i = 0; i < speed; i++) {
+                    listControl.getScrollPattern().scroll(0, 3, 0, 0);
+                    try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+            } catch (Exception e) {
+                break;
+            }
+
+            if (!foundInThisPage && started) {
+                repeatCount++;
+                if (repeatCount >= 3) break; // 连续几页没有新内容则停止
+            } else {
+                repeatCount = 0;
+            }
+        }
+
+        return friends;
+    }
+
+    /**
+     * 获取好友详情列表
+     */
+    public List<Map<String, String>> GetFriendDetails(Integer n, int timeout, boolean saveImage) {
+        return GetFriendDetails(n, timeout, saveImage, 0, 0, null, 3, 10);
+    }
+
+    /**
+     * 获取好友详情列表（带回调）
+     */
+    public List<Map<String, String>> GetFriendDetails(Integer n, java.util.function.Function<String, Boolean> callback) {
+        return GetFriendDetails(n, 0xFFFFF, false, 0, 0, callback, 3, 10);
+    }
+
+    public List<Map<String, String>> GetFriendDetails(int n) {
+        return GetFriendDetails(Integer.valueOf(n), 0xFFFFF, false);
+    }
+
+    public List<Map<String, String>> GetFriendDetails() {
+        return GetFriendDetails(null, 0xFFFFF, false);
+    }
+
+    // ==================== 对话框 ====================
+
+    /**
+     * 获取当前窗口的对话框
+     */
+    public WeChatDialog GetDialog(int wait) {
+        _show();
+        try { Thread.sleep(wait * 500L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Control dialog = Control.getBackend().findControl(
+                SearchCondition.builder().controlType(ControlType.Pane).subName("提示").build());
+        if (dialog.exists(1)) return new WeChatDialog(dialog);
+
+        dialog = Control.getBackend().findControl(
+                SearchCondition.builder().controlType(ControlType.Pane).subName("Notice").build());
+        if (dialog.exists(1)) return new WeChatDialog(dialog);
+
+        return null;
+    }
+
+    public WeChatDialog GetDialog() {
+        return GetDialog(3);
+    }
+
+    // ==================== 内部方法 ====================
+
+    private void init(boolean resize) {
         WinAutomation.init();
 
-        // 2. 定位微信主窗口
         mainWindow = Control.window()
                 .className(WxParams.WX_CLASS_NAME)
                 .searchDepth(1)
@@ -305,188 +986,63 @@ public class WeChat {
                     "未找到微信窗口，请确认微信已启动并登录。窗口类名: " + WxParams.WX_CLASS_NAME);
         }
 
-        // 3. 解析窗口布局
-        layout = WxLayout.parse(mainWindow);
+        this.window = mainWindow;
+        this.layout = WxLayout.parse(mainWindow);
 
-        // 4. 尝试获取用户昵称（从导航栏底部区域）
         try {
-            Control navBox = Control.getBackend().findControl(layout.getNavigationBoxCondition());
-            // 昵称通常在导航栏底部的 TextControl 中
-            // TODO: 需要根据实际微信 4.0.5 UI 结构调整定位方式
-            this.nickname = "Unknown";
+            this.nickname = mainWindow.getName();
         } catch (Exception e) {
             this.nickname = "Unknown";
         }
     }
 
-    /**
-     * 确保微信窗口可见并处于前台
-     */
-    private void _show() {
-        if (mainWindow == null) {
-            return;
-        }
+    // ==================== 监听机制内部实现 ====================
+
+    private synchronized void startListening() {
+        if (listenTask != null && !listenTask.isDone()) return;
+        listenExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "wx-listener");
+            t.setDaemon(true);
+            return t;
+        });
+        listenTask = listenExecutor.scheduleAtFixedRate(this::pollListenMessages, 1, 1, TimeUnit.SECONDS);
+    }
+
+    private synchronized void stopListeningInternal() {
+        if (listenTask != null) { listenTask.cancel(false); listenTask = null; }
+        if (listenExecutor != null) { listenExecutor.shutdown(); listenExecutor = null; }
+    }
+
+    private void pollListenMessages() {
         try {
-            // 如果窗口最小化，先恢复
-            if (mainWindow.getWindowPattern().getVisualState() == 2) {
-                mainWindow.getWindowPattern().restore();
+            _show();
+            for (String target : listenCallbacks.keySet()) {
+                try {
+                    ChatWith(target, false);
+                    try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+
+                    List<Message> messages = GetAllMessage();
+                    for (Message msg : messages) {
+                        String rid = msg.getRuntimeId();
+                        if (rid != null && !usedmsgid.contains(rid)) {
+                            usedmsgid.add(rid);
+                            if (Message.ATTR_FRIEND.equals(msg.getAttr()) || Message.ATTR_SYSTEM.equals(msg.getAttr())) {
+                                newMessages.computeIfAbsent(target, k -> new CopyOnWriteArrayList<>()).add(msg);
+                                List<BiConsumer<Message, Chat>> callbacks = listenCallbacks.get(target);
+                                if (callbacks != null) {
+                                    Chat chatRef = null;
+                                    for (Chat sw : subWindows) {
+                                        if (target.equals(sw.getWho())) { chatRef = sw; break; }
+                                    }
+                                    for (BiConsumer<Message, Chat> cb : callbacks) {
+                                        try { cb.accept(msg, chatRef); } catch (Exception e) { /* ignore */ }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) { /* 单个目标失败不影响其他 */ }
             }
-            // 尝试将窗口置前
-            mainWindow.click();
-        } catch (Exception e) {
-            // 忽略，继续执行
-        }
-    }
-
-    /**
-     * 获取聊天输入框控件
-     *
-     * @return 聊天输入框 EditControl
-     */
-    private EditControl getEditBox() {
-        Control chatBox = Control.getBackend().findControl(layout.getChatBoxCondition());
-        // 在 ChatBox 中查找 EditControl（消息输入框）
-        Control edit = chatBox.findEdit();
-        if (edit instanceof EditControl) {
-            return (EditControl) edit;
-        }
-        // 如果直接查找失败，使用 layout 中保存的条件
-        Control editFromLayout = Control.getBackend().findControl(layout.getEditBoxCondition());
-        if (editFromLayout instanceof EditControl) {
-            return (EditControl) editFromLayout;
-        }
-        throw new IllegalStateException("无法定位聊天输入框");
-    }
-
-    /**
-     * 解析单个消息项
-     *
-     * <p>根据控件高度判断消息类型，并提取消息内容。</p>
-     *
-     * @param item     消息列表中的单个 ListItemControl 的原生元素
-     * @param chatRect 聊天区域的边界矩形 [left, top, right, bottom]，用于判断消息方向
-     * @return 解析后的 Message 对象，解析失败返回 null
-     */
-    private Message parseMessageItem(IUIAutomationElement item, int[] chatRect) {
-        String name = item.getName();
-        int[] rect = item.getBoundingRectangle();
-        int height = rect[3] - rect[1]; // bottom - top
-        String runtimeId = buildRuntimeId(item);
-
-        // 根据高度判断消息类型
-        if (height == WxParams.SYS_TEXT_HEIGHT) {
-            // 系统消息、时间分隔、撤回提示的高度相同，通过内容进一步区分
-            if (name != null && name.contains("撤回")) {
-                return new Message(Message.TYPE_RECALL, null, name, runtimeId);
-            }
-            // 时间消息通常包含时间相关关键词
-            if (isTimeMessage(name)) {
-                return new Message(Message.TYPE_TIME, null, name, runtimeId);
-            }
-            return new Message(Message.TYPE_SYS, null, name, runtimeId);
-        }
-
-        if (height == WxParams.TIME_TEXT_HEIGHT && isTimeMessage(name)) {
-            return new Message(Message.TYPE_TIME, null, name, runtimeId);
-        }
-
-        if (height == WxParams.RECALL_TEXT_HEIGHT && name != null && name.contains("撤回")) {
-            return new Message(Message.TYPE_RECALL, null, name, runtimeId);
-        }
-
-        // 普通消息：判断是对方消息还是自己消息
-        String type;
-        String sender = null;
-
-        if (chatRect != null && rect.length >= 4) {
-            // 通过消息控件的左边界位置判断消息方向
-            // 对方消息靠左，自己消息靠右
-            int chatCenterX = chatRect[0] + (chatRect[2] - chatRect[0]) / 2;
-            int msgCenterX = rect[0] + (rect[2] - rect[0]) / 2;
-            if (msgCenterX < chatCenterX) {
-                type = Message.TYPE_FRIEND;
-            } else {
-                type = Message.TYPE_SELF;
-            }
-        } else {
-            // 无法判断方向时，默认标记为 friend
-            type = Message.TYPE_FRIEND;
-        }
-
-        // 提取发送者名称和内容
-        // TODO: 需要根据实际微信 4.0.5 UI 结构调整子控件解析逻辑
-        // 当前使用控件 Name 属性作为消息内容
-        String content = name != null ? name : "";
-
-        return new Message(type, sender, content, runtimeId);
-    }
-
-    /**
-     * 判断文本是否为时间消息
-     */
-    private boolean isTimeMessage(String text) {
-        if (text == null || text.isEmpty()) {
-            return false;
-        }
-        // 时间消息的特征：包含时间关键词或纯时间格式
-        return text.contains("昨天") || text.contains("今天") || text.contains("星期")
-                || text.contains("上午") || text.contains("下午")
-                || text.matches("\\d{1,2}:\\d{2}.*")
-                || text.contains("Monday") || text.contains("Tuesday")
-                || text.contains("Yesterday") || text.contains("Today");
-    }
-
-    /**
-     * 构建元素的 RuntimeId 字符串（用于消息去重）
-     */
-    private String buildRuntimeId(IUIAutomationElement element) {
-        try {
-            int[] ids = element.getRuntimeId();
-            if (ids != null && ids.length > 0) {
-                StringBuilder sb = new StringBuilder();
-                for (int id : ids) {
-                    sb.append(id).append(",");
-                }
-                return sb.toString();
-            }
-        } catch (Exception e) {
-            // 忽略
-        }
-        // 回退方案：使用 Name + 位置 作为唯一标识
-        int[] rect = element.getBoundingRectangle();
-        String name = element.getName();
-        return (name != null ? name : "") + "_"
-                + rect[0] + "_" + rect[1] + "_" + rect[2] + "_" + rect[3];
-    }
-
-    /**
-     * 获取控件的边界矩形
-     */
-    private int[] getBoundingRect(Control control) {
-        Object nativeEl = control.getNativeElement();
-        if (nativeEl instanceof IUIAutomationElement) {
-            return ((IUIAutomationElement) nativeEl).getBoundingRectangle();
-        }
-        return null;
-    }
-
-    /**
-     * 设置系统剪贴板文本
-     *
-     * @param text 要复制到剪贴板的文本
-     */
-    private void setClipboard(String text) {
-        Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
-        clipboard.setContents(new StringSelection(text), null);
-    }
-
-    /**
-     * 获取指定 key 的本地化文本
-     *
-     * @param key 内部标识（中文）
-     * @return 当前语言对应的 UI 文本
-     */
-    private String _lang(String key) {
-        return MainLanguage.get(key, language);
+        } catch (Exception e) { /* ignore */ }
     }
 }

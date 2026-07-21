@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane xmlns="http://javafx.com/javafx"
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="io.getbit.app.MainController"
+            styleClass="root-pane">
+
+    <!-- 顶部工具栏 -->
+    <top>
+        <HBox styleClass="toolbar" spacing="10" alignment="CENTER_LEFT">
+            <padding>
+                <Insets top="8" right="12" bottom="8" left="12"/>
+            </padding>
+            <Button fx:id="btnConnect" text="连接微信" onAction="#onConnect" styleClass="btn-primary"/>
+            <Separator orientation="VERTICAL"/>
+            <Label fx:id="lblStatus" text="○ 未连接" styleClass="status-disconnected"/>
+            <Region HBox.hgrow="ALWAYS"/>
+            <Button fx:id="btnRefresh" text="刷新消息" onAction="#onRefresh" disable="true"/>
+        </HBox>
+    </top>
+
+    <!-- 左侧会话列表 -->
+    <left>
+        <VBox prefWidth="220" styleClass="sidebar">
+            <Label text="会话列表" styleClass="sidebar-title">
+                <padding>
+                    <Insets top="8" right="10" bottom="4" left="10"/>
+                </padding>
+            </Label>
+            <ListView fx:id="listSessions" VBox.vgrow="ALWAYS" styleClass="session-list"/>
+        </VBox>
+    </left>
+
+    <!-- 中心区域：消息 + 输入 -->
+    <center>
+        <VBox spacing="0">
+            <!-- 消息列表 -->
+            <ListView fx:id="listMessages" VBox.vgrow="ALWAYS" styleClass="message-list"/>
+
+            <!-- 输入区域 -->
+            <VBox styleClass="input-area" spacing="6">
+                <padding>
+                    <Insets top="8" right="10" bottom="10" left="10"/>
+                </padding>
+                <HBox spacing="6" alignment="CENTER_LEFT">
+                    <Label text="发送给:"/>
+                    <TextField fx:id="txtRecipient" promptText="联系人/群名称" HBox.hgrow="ALWAYS"/>
+                </HBox>
+                <HBox spacing="6">
+                    <TextArea fx:id="txtMessage" promptText="输入消息... (Ctrl+Enter 发送)"
+                              prefRowCount="3" wrapText="true" HBox.hgrow="ALWAYS"/>
+                </HBox>
+                <HBox alignment="CENTER_RIGHT" spacing="8">
+                    <Button fx:id="btnSend" text="发送" onAction="#onSend"
+                            disable="true" styleClass="btn-send"/>
+                </HBox>
+            </VBox>
+        </VBox>
+    </center>
+
+</BorderPane>
