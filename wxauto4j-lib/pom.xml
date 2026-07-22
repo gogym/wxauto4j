@@ -17,7 +17,7 @@
   <dependencies>
     <dependency>
       <groupId>io.getbit</groupId>
-      <artifactId>uiautomation4j-win</artifactId>
+      <artifactId>uiautomation4j-core</artifactId>
     </dependency>
     <dependency>
       <groupId>junit</groupId>

@@ -10,7 +10,6 @@ import io.getbit.uiautomation.control.Control;
 import io.getbit.uiautomation.control.EditControl;
 import io.getbit.uiautomation.control.WindowControl;
 import io.getbit.uiautomation.enums.ControlType;
-import io.getbit.uiautomation.win.com.IUIAutomationElement;
 
 import java.awt.Toolkit;
 import java.awt.datatransfer.Clipboard;
@@ -373,21 +372,13 @@ public class Chat {
         Control chatBox = Control.getBackend().findControl(layout.getChatBoxCondition());
         Control listControl = chatBox.findList();
 
-        Object listNative = listControl.getNativeElement();
-        if (!(listNative instanceof IUIAutomationElement)) {
-            return messages;
-        }
-        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
+        int[] chatRect = getBoundingRect(listControl);
 
-        int[] chatRect = getBoundingRect(chatBox);
-
-        IUIAutomationElement child = listElement.getFirstChild();
-        while (child != null) {
+        for (Control child : listControl.getChildren()) {
             Message msg = parseMessageItem(child, chatRect);
             if (msg != null) {
                 messages.add(msg);
             }
-            child = child.getNextSibling();
         }
 
         return messages;
@@ -522,7 +513,7 @@ public class Chat {
     /**
      * 解析单个消息项
      */
-    protected Message parseMessageItem(IUIAutomationElement item, int[] chatRect) {
+    protected Message parseMessageItem(Control item, int[] chatRect) {
         String name = item.getName();
         int[] rect = item.getBoundingRectangle();
         int height = rect[3] - rect[1];
@@ -570,7 +561,7 @@ public class Chat {
     /**
      * 构建 RuntimeId 字符串
      */
-    protected String buildRuntimeId(IUIAutomationElement element) {
+    protected String buildRuntimeId(Control element) {
         try {
             int[] ids = element.getRuntimeId();
             if (ids != null && ids.length > 0) {
@@ -588,11 +579,7 @@ public class Chat {
      * 获取控件边界矩形
      */
     protected int[] getBoundingRect(Control control) {
-        Object nativeEl = control.getNativeElement();
-        if (nativeEl instanceof IUIAutomationElement) {
-            return ((IUIAutomationElement) nativeEl).getBoundingRectangle();
-        }
-        return null;
+        return control.getBoundingRectangle();
     }
 
     /**

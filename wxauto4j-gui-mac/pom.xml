@@ -10,9 +10,9 @@
     <version>1.0-SNAPSHOT</version>
   </parent>
 
-  <artifactId>wxauto4j-gui-win</artifactId>
-  <name>wxauto4j-gui-win</name>
-  <description>微信自动化运行主体（JavaFX GUI）</description>
+  <artifactId>wxauto4j-gui-mac</artifactId>
+  <name>wxauto4j-gui-mac</name>
+  <description>微信自动化运行主体（JavaFX GUI - macOS）</description>
 
   <dependencies>
     <dependency>
@@ -21,7 +21,7 @@
     </dependency>
     <dependency>
       <groupId>io.getbit</groupId>
-      <artifactId>uiautomation4j-win</artifactId>
+      <artifactId>uiautomation4j-mac</artifactId>
     </dependency>
     <dependency>
       <groupId>org.openjfx</groupId>

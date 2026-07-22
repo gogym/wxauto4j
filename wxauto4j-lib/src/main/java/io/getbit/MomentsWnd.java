@@ -8,7 +8,6 @@ import io.getbit.uiautomation.condition.SearchCondition;
 import io.getbit.uiautomation.control.Control;
 import io.getbit.uiautomation.control.WindowControl;
 import io.getbit.uiautomation.enums.ControlType;
-import io.getbit.uiautomation.win.com.IUIAutomationElement;
 
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
@@ -89,17 +88,11 @@ public class MomentsWnd {
                             .build());
 
             if (listControl.exists(2)) {
-                Object listNative = listControl.getNativeElement();
-                if (listNative instanceof IUIAutomationElement) {
-                    IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-                    IUIAutomationElement child = listElement.getFirstChild();
-                    while (child != null) {
-                        String name = child.getName();
-                        if (name != null && !name.isEmpty()) {
-                            Moment m = new Moment(name, child);
-                            moments.add(m);
-                        }
-                        child = child.getNextSibling();
+                for (Control child : listControl.getChildren()) {
+                    String name = child.getName();
+                    if (name != null && !name.isEmpty()) {
+                        Moment m = new Moment(name, child);
+                        moments.add(m);
                     }
                 }
             }
@@ -243,9 +236,9 @@ public class MomentsWnd {
      */
     public static class Moment {
         private final String content;
-        private final IUIAutomationElement nativeElement;
+        private final Control nativeElement;
 
-        public Moment(String content, IUIAutomationElement nativeElement) {
+        public Moment(String content, Control nativeElement) {
             this.content = content;
             this.nativeElement = nativeElement;
         }

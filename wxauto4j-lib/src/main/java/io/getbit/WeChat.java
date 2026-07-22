@@ -12,18 +12,10 @@ import io.getbit.uiautomation.control.Control;
 import io.getbit.uiautomation.control.EditControl;
 import io.getbit.uiautomation.control.WindowControl;
 import io.getbit.uiautomation.enums.ControlType;
-import io.getbit.uiautomation.win.WinAutomation;
-import io.getbit.uiautomation.win.com.IUIAutomationElement;
 
-import java.awt.datatransfer.Clipboard;
-import java.awt.datatransfer.DataFlavor;
-import java.awt.datatransfer.StringSelection;
-import java.awt.datatransfer.Transferable;
 import java.io.File;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -227,20 +219,12 @@ public class WeChat extends Chat {
         Control sessionBox = Control.getBackend().findControl(layout.getSessionBoxCondition());
         Control listControl = sessionBox.findList();
 
-        Object listNative = listControl.getNativeElement();
-        if (!(listNative instanceof IUIAutomationElement)) {
-            return sessions;
-        }
-        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-
-        IUIAutomationElement child = listElement.getFirstChild();
-        while (child != null) {
+        for (Control child : listControl.getChildren()) {
             String name = child.getName();
             if (name != null && !name.isEmpty()) {
                 SessionElement se = new SessionElement(name);
                 sessions.add(se);
             }
-            child = child.getNextSibling();
         }
         return sessions;
     }
@@ -474,18 +458,12 @@ public class WeChat extends Chat {
                 SearchCondition.builder().controlType(ControlType.List).build());
 
         if (listControl.exists(2)) {
-            Object listNative = listControl.getNativeElement();
-            if (listNative instanceof IUIAutomationElement) {
-                IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-                IUIAutomationElement child = listElement.getFirstChild();
-                while (child != null) {
-                    String name = child.getName();
-                    if (name != null && !name.isEmpty()) {
-                        NewFriendElement nf = new NewFriendElement(name);
-                        nf.setNativeElement(child);
-                        friends.add(nf);
-                    }
-                    child = child.getNextSibling();
+            for (Control child : listControl.getChildren()) {
+                String name = child.getName();
+                if (name != null && !name.isEmpty()) {
+                    NewFriendElement nf = new NewFriendElement(name);
+                    nf.setNativeElement(child);
+                    friends.add(nf);
                 }
             }
         }
@@ -727,15 +705,9 @@ public class WeChat extends Chat {
                 SearchCondition.builder().controlType(ControlType.List).build());
 
         if (listControl.exists(2)) {
-            Object listNative = listControl.getNativeElement();
-            if (listNative instanceof IUIAutomationElement) {
-                IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-                IUIAutomationElement child = listElement.getFirstChild();
-                while (child != null) {
-                    String name = child.getName();
-                    if (name != null && !name.isEmpty()) groups.add(name);
-                    child = child.getNextSibling();
-                }
+            for (Control child : listControl.getChildren()) {
+                String name = child.getName();
+                if (name != null && !name.isEmpty()) groups.add(name);
             }
         }
 
@@ -822,20 +794,15 @@ public class WeChat extends Chat {
                 SearchCondition.builder().controlType(ControlType.List).build());
         if (!listControl.exists(3)) return friends;
 
-        Object listNative = listControl.getNativeElement();
-        if (!(listNative instanceof IUIAutomationElement)) return friends;
-
-        IUIAutomationElement listElement = (IUIAutomationElement) listNative;
-
         // 如果有 callback，先滚动找到起始位置
         boolean started = (callback == null);
         int repeatCount = 0;
 
         for (int repeat = 0; repeat < maxRepeat; repeat++) {
-            IUIAutomationElement child = listElement.getFirstChild();
+            List<Control> children = listControl.getChildren();
             boolean foundInThisPage = false;
 
-            while (child != null) {
+            for (Control child : children) {
                 if (n != null && friends.size() >= n) break;
                 String name = child.getName();
                 if (name != null && !name.isEmpty()) {
@@ -868,26 +835,20 @@ public class WeChat extends Chat {
                                     SearchCondition.builder().controlType(ControlType.Pane).build());
                             if (detailPanel.exists(1)) {
                                 // 尝试获取微信号、标签、个性签名等信息
-                                Object detailNative = detailPanel.getNativeElement();
-                                if (detailNative instanceof IUIAutomationElement) {
-                                    IUIAutomationElement detailEl = (IUIAutomationElement) detailNative;
-                                    IUIAutomationElement detailChild = detailEl.getFirstChild();
-                                    while (detailChild != null) {
-                                        String detailText = detailChild.getName();
-                                        if (detailText != null) {
-                                            if (detailText.contains("微信号")) {
-                                                info.put("微信号", detailText.replace("微信号", "").trim());
-                                            } else if (detailText.contains("标签")) {
-                                                info.put("标签", detailText.replace("标签", "").trim());
-                                            } else if (detailText.contains("个性签名")) {
-                                                info.put("个性签名", detailText.replace("个性签名", "").trim());
-                                            } else if (detailText.contains("来源")) {
-                                                info.put("来源", detailText.replace("来源", "").trim());
-                                            } else if (detailText.contains("共同群聊")) {
-                                                info.put("共同群聊", detailText.replace("共同群聊", "").trim());
-                                            }
+                                for (Control detailChild : detailPanel.getChildren()) {
+                                    String detailText = detailChild.getName();
+                                    if (detailText != null) {
+                                        if (detailText.contains("微信号")) {
+                                            info.put("微信号", detailText.replace("微信号", "").trim());
+                                        } else if (detailText.contains("标签")) {
+                                            info.put("标签", detailText.replace("标签", "").trim());
+                                        } else if (detailText.contains("个性签名")) {
+                                            info.put("个性签名", detailText.replace("个性签名", "").trim());
+                                        } else if (detailText.contains("来源")) {
+                                            info.put("来源", detailText.replace("来源", "").trim());
+                                        } else if (detailText.contains("共同群聊")) {
+                                            info.put("共同群聊", detailText.replace("共同群聊", "").trim());
                                         }
-                                        detailChild = detailChild.getNextSibling();
                                     }
                                 }
                             }
@@ -899,7 +860,6 @@ public class WeChat extends Chat {
                         foundInThisPage = true;
                     }
                 }
-                child = child.getNextSibling();
             }
 
             if (n != null && friends.size() >= n) break;
@@ -974,7 +934,7 @@ public class WeChat extends Chat {
     // ==================== 内部方法 ====================
 
     private void init(boolean resize) {
-        WinAutomation.init();
+        initAutomationBackend();
 
         mainWindow = Control.window()
                 .className(WxParams.WX_CLASS_NAME)
@@ -993,6 +953,52 @@ public class WeChat extends Chat {
             this.nickname = mainWindow.getName();
         } catch (Exception e) {
             this.nickname = "Unknown";
+        }
+    }
+
+    /**
+     * 通过反射初始化平台自动化后端
+     *
+     * <p>根据系统属性 {@code wxauto4j.platform} 或操作系统名称自动检测平台，
+     * 动态加载对应的 Automation 类（win: {@code WinAutomation}, mac: {@code MacAutomation}）。</p>
+     *
+     * <p>可通过 JVM 参数 {@code -Dwxauto4j.platform=win|mac} 强制指定平台。</p>
+     */
+    private static void initAutomationBackend() {
+        String platform = System.getProperty("wxauto4j.platform");
+        if (platform == null || platform.isEmpty()) {
+            String osName = System.getProperty("os.name", "").toLowerCase();
+            if (osName.contains("win")) {
+                platform = "win";
+            } else if (osName.contains("mac") || osName.contains("darwin")) {
+                platform = "mac";
+            } else {
+                throw new UnsupportedOperationException(
+                        "不支持的操作系统: " + osName + "，请通过 -Dwxauto4j.platform=win|mac 指定平台");
+            }
+        }
+
+        String className;
+        switch (platform.toLowerCase()) {
+            case "win":
+                className = "io.getbit.uiautomation.win.WinAutomation";
+                break;
+            case "mac":
+                className = "io.getbit.uiautomation.mac.MacAutomation";
+                break;
+            default:
+                throw new UnsupportedOperationException("不支持的平台: " + platform);
+        }
+
+        try {
+            Class<?> automationClass = Class.forName(className);
+            automationClass.getMethod("init").invoke(null);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException(
+                    "未找到平台后端实现类: " + className + "，请确认已引入对应平台的 uiautomation4j 依赖",
+                    e);
+        } catch (Exception e) {
+            throw new IllegalStateException("初始化平台后端失败: " + className, e);
         }
     }
 

@@ -1,9 +1,6 @@
 package io.getbit.elements;
 
-import io.getbit.uiautomation.condition.SearchCondition;
 import io.getbit.uiautomation.control.Control;
-import io.getbit.uiautomation.enums.ControlType;
-import io.getbit.uiautomation.win.com.IUIAutomationElement;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -283,15 +280,10 @@ public class Message {
      * 将消息滚动到视野内
      */
     public void rollIntoView() {
-        if (nativeElement instanceof IUIAutomationElement) {
+        if (nativeElement instanceof Control) {
             try {
-                Control msgControl = Control.getBackend().findControl(
-                        SearchCondition.builder()
-                                .controlType(ControlType.ListItem)
-                                .build());
-                if (msgControl.exists(1)) {
-                    // 元素已在视野中或已滚动到可见
-                }
+                Control msgControl = (Control) nativeElement;
+                // 元素已在视野中或已滚动到可见
             } catch (Exception e) {
                 // 忽略
             }
@@ -304,18 +296,10 @@ public class Message {
      * 点击该消息（一般用于图片、视频等特殊消息）
      */
     public void click() {
-        if (nativeElement instanceof IUIAutomationElement) {
+        if (nativeElement instanceof Control) {
             try {
-                IUIAutomationElement el = (IUIAutomationElement) nativeElement;
-                String name = el.getName();
-                Control msgControl = Control.getBackend().findControl(
-                        SearchCondition.builder()
-                                .name(name)
-                                .controlType(ControlType.ListItem)
-                                .build());
-                if (msgControl.exists(1)) {
-                    msgControl.click();
-                }
+                Control msgControl = (Control) nativeElement;
+                msgControl.click();
             } catch (Exception e) {
                 // 忽略
             }
@@ -330,14 +314,14 @@ public class Message {
      */
     public WxResponse selectOption(String option) {
         try {
-            if (!(nativeElement instanceof IUIAutomationElement)) {
+            if (!(nativeElement instanceof Control)) {
                 return WxResponse.fail("消息无关联 UI 元素");
             }
             // 右键消息打开上下文菜单
-            // TODO: Control 暂无 rightClick 方法，需要通过其他方式实现右键
-            // 1. 使用 Windows SendInput 模拟右键
-            // 2. 或使用 IUIAutomationElement 的 InvokePattern
-            return WxResponse.fail("selectOption 尚未完整实现（需要右键支持）");
+            Control msgControl = (Control) nativeElement;
+            msgControl.rightClick();
+            // TODO: 选择指定选项
+            return WxResponse.fail("selectOption 尚未完整实现");
         } catch (Exception e) {
             return WxResponse.fail("选择选项失败: " + e.getMessage());
         }
@@ -353,19 +337,14 @@ public class Message {
      */
     public WxResponse quote(String text, List<String> at, int timeout) {
         try {
-            if (!(nativeElement instanceof IUIAutomationElement)) {
+            if (!(nativeElement instanceof Control)) {
                 return WxResponse.fail("消息无关联 UI 元素");
             }
 
             // 先点击消息
-            IUIAutomationElement el = (IUIAutomationElement) nativeElement;
-            String name = el.getName();
-            Control msgControl = Control.getBackend().findControl(
-                    SearchCondition.builder().name(name).build());
-            if (msgControl.exists(1)) {
-                msgControl.click();
-                try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            }
+            Control msgControl = (Control) nativeElement;
+            msgControl.click();
+            try { Thread.sleep(300); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
             // TODO: 需要通过微信引用功能面板完成引用回复
             return WxResponse.fail("quote 尚未完整实现");
@@ -388,7 +367,7 @@ public class Message {
      */
     public WxResponse forward(List<String> targets, String message, int timeout) {
         try {
-            if (!(nativeElement instanceof IUIAutomationElement)) {
+            if (!(nativeElement instanceof Control)) {
                 return WxResponse.fail("消息无关联 UI 元素");
             }
 
@@ -422,7 +401,7 @@ public class Message {
      */
     public WxResponse tickle() {
         try {
-            if (!(nativeElement instanceof IUIAutomationElement)) {
+            if (!(nativeElement instanceof Control)) {
                 return WxResponse.fail("消息无关联 UI 元素");
             }
             return selectOption("拍一拍");
@@ -436,7 +415,7 @@ public class Message {
      */
     public void downloadHeadImage() {
         try {
-            if (!(nativeElement instanceof IUIAutomationElement)) return;
+            if (!(nativeElement instanceof Control)) return;
             // TODO: 需要通过消息发送人头像控件下载
         } catch (Exception e) {
             // 忽略
