@@ -7,6 +7,9 @@ import io.getbit.elements.WxResponse;
 import io.getbit.internal.WxLayout;
 import io.getbit.internal.WxParams;
 import io.getbit.internal.languages.MainLanguage;
+import io.getbit.internal.platform.MacWeChatPlatform;
+import io.getbit.internal.platform.WeChatPlatform;
+import io.getbit.internal.platform.WinWeChatPlatform;
 import io.getbit.uiautomation.condition.SearchCondition;
 import io.getbit.uiautomation.control.Control;
 import io.getbit.uiautomation.control.EditControl;
@@ -29,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -41,8 +46,46 @@ import java.util.stream.Collectors;
  */
 public class WeChat extends Chat {
 
+    private static final Logger LOG = Logger.getLogger(WeChat.class.getName());
+
+    /** 外部日志回调（GUI 可设置，使 SDK 内部日志输出到界面） */
+    private static volatile Consumer<String> logCallback;
+
+    // 确保 Logger 输出到控制台（stderr），不重复
+    static {
+        LOG.setUseParentHandlers(false); // 禁止父 Logger 重复输出
+        try {
+            java.util.logging.ConsoleHandler handler = new java.util.logging.ConsoleHandler();
+            handler.setLevel(java.util.logging.Level.ALL);
+            LOG.addHandler(handler);
+            LOG.setLevel(java.util.logging.Level.ALL);
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
+    /** 设置全局日志回调，SDK 内部日志会通过此回调输出 */
+    public static void setLogCallback(Consumer<String> callback) {
+        logCallback = callback;
+    }
+
+    /** 内部日志输出：Logger 输出到控制台 + 回调输出到 GUI */
+    private static void log(String msg) {
+        LOG.info(msg);
+        Consumer<String> cb = logCallback;
+        if (cb != null) {
+            try { cb.accept(msg); } catch (Exception e) { /* ignore */ }
+        }
+    }
+
     /** 微信客户端支持的目标版本号 */
     public static final String VERSION = "4.0.5";
+
+    /** 当前运行平台：win / mac */
+    private static String detectedPlatform;
+
+    /** 平台实现 */
+    private WeChatPlatform platform;
 
     /** 微信主窗口控件 */
     private WindowControl mainWindow;
@@ -262,7 +305,8 @@ public class WeChat extends Chat {
                 .findWindow();
 
         if (chatWnd != null && chatWnd.exists(2)) {
-            Chat sub = new Chat(nickname, chatWnd, language);
+            WxLayout subLayout = platform.parseLayout(chatWnd);
+            Chat sub = new Chat(nickname, chatWnd, language, subLayout);
             subWindows.add(sub);
             return sub;
         }
@@ -934,26 +978,56 @@ public class WeChat extends Chat {
     // ==================== 内部方法 ====================
 
     private void init(boolean resize) {
-        initAutomationBackend();
+        log("[wxauto4j] init() 开始, 平台检测中...");
+        detectedPlatform = detectPlatform();
+        log("[wxauto4j] 检测到平台: " + detectedPlatform);
 
-        mainWindow = Control.window()
-                .className(WxParams.WX_CLASS_NAME)
-                .searchDepth(1)
-                .findWindow();
-
-        if (mainWindow == null || !mainWindow.exists(2)) {
-            throw new IllegalStateException(
-                    "未找到微信窗口，请确认微信已启动并登录。窗口类名: " + WxParams.WX_CLASS_NAME);
+        // 创建平台实现
+        switch (detectedPlatform) {
+            case "mac":
+                platform = new MacWeChatPlatform();
+                break;
+            case "win":
+            default:
+                platform = new WinWeChatPlatform();
+                break;
         }
 
+        log("[wxauto4j] 正在初始化自动化后端...");
+        initAutomationBackend();
+        log("[wxauto4j] 自动化后端已初始化");
+
+        // 平台前置检查（如 macOS 辅助功能权限）
+        platform.preInitCheck();
+
+        // 初始化窗口
+        mainWindow = platform.initWindow();
+
         this.window = mainWindow;
-        this.layout = WxLayout.parse(mainWindow);
+        log("[wxauto4j] 开始解析窗口布局...");
+        this.layout = platform.parseLayout(mainWindow);
+        log("[wxauto4j] 布局解析完成");
 
         try {
             this.nickname = mainWindow.getName();
         } catch (Exception e) {
             this.nickname = "Unknown";
         }
+        log("[wxauto4j] init() 完成, 昵称: " + this.nickname);
+    }
+
+    /**
+     * 检测当前平台
+     */
+    private static String detectPlatform() {
+        String platform = System.getProperty("wxauto4j.platform");
+        if (platform != null && !platform.isEmpty()) {
+            return platform.toLowerCase();
+        }
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        if (osName.contains("win")) return "win";
+        if (osName.contains("mac") || osName.contains("darwin")) return "mac";
+        throw new UnsupportedOperationException("不支持的操作系统: " + osName);
     }
 
     /**
@@ -1001,7 +1075,7 @@ public class WeChat extends Chat {
             throw new IllegalStateException("初始化平台后端失败: " + className, e);
         }
     }
-
+    
     // ==================== 监听机制内部实现 ====================
 
     private synchronized void startListening() {

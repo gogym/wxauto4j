@@ -208,6 +208,9 @@ public class MainController implements Initializable {
         setBusy(true, "正在连接微信...");
         executor.submit(() -> {
             try {
+                appendLog("正在初始化微信连接...");
+                // 设置 SDK 日志回调，让内部日志输出到界面
+                io.getbit.WeChat.setLogCallback(msg -> appendLog(msg));
                 weChat = new WeChat();
                 Platform.runLater(() -> {
                     updateStatus(true);
@@ -215,8 +218,10 @@ public class MainController implements Initializable {
                     appendLog("已连接到微信，昵称: " + weChat.getNickname());
                 });
             } catch (Exception e) {
+                LOG.log(java.util.logging.Level.WARNING, "连接微信失败", e);
                 Platform.runLater(() -> {
                     setBusy(false, "");
+                    appendLog("连接微信失败: " + e.getMessage());
                     showError("连接失败", e.getMessage());
                 });
             }

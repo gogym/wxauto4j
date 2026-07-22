@@ -46,7 +46,7 @@ public class WxLayout {
     }
 
     /**
-     * 解析微信主窗口布局
+     * 解析微信主窗口布局（Windows 平台）
      *
      * <p>从已定位的微信主窗口出发，解析出三大区域的搜索条件。
      * 微信 4.0.5 的窗口结构为：MainWindow → Pane → Pane → [NavigationBox, SessionBox, ChatBox]</p>
@@ -95,6 +95,56 @@ public class WxLayout {
         SearchCondition editBox = SearchCondition.builder()
                 .controlType(ControlType.Edit)
                 .searchFrom(chatBox)
+                .build();
+
+        return new WxLayout(navBox, sessBox, chatBox, editBox);
+    }
+
+    /**
+     * 解析微信主窗口布局（macOS 平台）
+     *
+     * <p>macOS 版微信 4.1.5 的布局结构与 Windows 不同：
+     * <pre>
+     * AXWindow "微信"
+     *   └─ AXGroup → AXGroup → AXSplitGroup
+     *        ├─ AXGroup (左面板)
+     *        │    ├─ AXTextField "搜索 Search"  (搜索框)
+     *        │    ├─ AXStaticText "会话"
+     *        │    └─ AXTable (会话列表)
+     *        └─ AXGroup (右面板)
+     *             └─ AXScrollArea (聊天区域)
+     * </pre>
+     * 使用基于名称和角色的搜索条件来定位各区域。</p>
+     *
+     * @param mainWindow 已定位的微信主窗口控件
+     * @return 解析完成的 WxLayout 实例
+     */
+    public static WxLayout parseMac(Control mainWindow) {
+        // 导航栏: 左侧面板（第一个 AXGroup 子元素，在 SplitGroup 内）
+        // Mac 上没有独立的导航栏，使用左侧面板作为导航区域
+        SearchCondition navBox = SearchCondition.builder()
+                .controlType(ControlType.Pane)
+                .searchFrom(mainWindow.getSearchCondition())
+                .build();
+
+        // 会话列表: AXTable（在 Mac 上映射为 ControlType.List）
+        SearchCondition sessBox = SearchCondition.builder()
+                .controlType(ControlType.List)
+                .searchFrom(mainWindow.getSearchCondition())
+                .build();
+
+        // 聊天区域: 右侧面板
+        // 使用 SplitGroup 角色来定位中间拆分区域，然后取其右侧子元素
+        SearchCondition chatBox = SearchCondition.builder()
+                .controlType(ControlType.SplitGroup)
+                .searchFrom(mainWindow.getSearchCondition())
+                .build();
+
+        // 搜索/输入框: AXTextField（搜索框）
+        // Mac 上搜索框是 AXTextField，名称包含 "搜索"
+        SearchCondition editBox = SearchCondition.builder()
+                .subName("搜索")
+                .searchFrom(mainWindow.getSearchCondition())
                 .build();
 
         return new WxLayout(navBox, sessBox, chatBox, editBox);

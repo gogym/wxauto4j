@@ -64,9 +64,21 @@ public class Chat {
         this.who = who;
         this.window = window;
         this.language = language;
-        if (window != null) {
-            this.layout = WxLayout.parse(window);
-        }
+    }
+
+    /**
+     * 创建聊天实例（指定布局）
+     *
+     * @param who      聊天对象名称
+     * @param window   窗口控件
+     * @param language 语言
+     * @param layout   窗口布局
+     */
+    public Chat(String who, WindowControl window, String language, WxLayout layout) {
+        this.who = who;
+        this.window = window;
+        this.language = language;
+        this.layout = layout;
     }
 
     // ==================== 属性 ====================
