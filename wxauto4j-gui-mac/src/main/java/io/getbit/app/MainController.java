@@ -1,10 +1,13 @@
 package io.getbit.app;
 
-import io.getbit.WeChat;
-import io.getbit.app.bot.BotEngine;
 import io.getbit.app.config.AppConfig;
 import io.getbit.app.config.ConfigManager;
 import io.getbit.app.prompt.PromptManager;
+import io.getbit.wxdb.WeChatDB;
+import io.getbit.wxdb.WeChatDBConfig;
+import io.getbit.wxdb.frida.FridaKeyExtractor;
+import io.getbit.wxdb.model.Contact;
+import io.getbit.wxdb.monitor.MessageMonitor;
 import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.fxml.Initializable;
@@ -13,11 +16,8 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
-import javafx.scene.text.Font;
-import javafx.scene.text.FontWeight;
 
 import java.net.URL;
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -28,8 +28,7 @@ import java.util.logging.Logger;
 /**
  * 主界面控制器
  *
- * <p>处理导航、微信连接、机器人启停、日志显示等核心功能。
- * 左侧 TreeView 导航，右侧 StackPane 切换不同功能面板。</p>
+ * <p>处理导航、配置管理、密钥提取、日志显示等功能。</p>
  */
 public class MainController implements Initializable {
 
@@ -39,16 +38,7 @@ public class MainController implements Initializable {
     // ==================== FXML 绑定 ====================
 
     @FXML
-    private Button btnConnect;
-
-    @FXML
-    private Button btnStartBot;
-
-    @FXML
     private Label lblStatus;
-
-    @FXML
-    private Label lblBotStatus;
 
     @FXML
     private TreeView<String> navTree;
@@ -70,12 +60,6 @@ public class MainController implements Initializable {
     /** Prompt 管理器 */
     private PromptManager promptManager;
 
-    /** 机器人引擎 */
-    private BotEngine botEngine;
-
-    /** 微信实例 */
-    private WeChat weChat;
-
     /** 后台线程池 */
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "wx-worker");
@@ -88,6 +72,18 @@ public class MainController implements Initializable {
 
     /** 当前选中的面板 */
     private String currentPanel = "状态面板";
+
+    /** 微信数据库 */
+    private WeChatDB weChatDB;
+
+    /** 消息监听器 */
+    private MessageMonitor messageMonitor;
+
+    /** 监听面板的消息显示区 */
+    private TextArea txtMonitorMessages;
+
+    /** 监听面板的监听列表 */
+    private ListView<String> lstMonitoredContacts;
 
     // ==================== 初始化 ====================
 
@@ -119,25 +115,24 @@ public class MainController implements Initializable {
 
         // 一级菜单
         TreeItem<String> statusItem = new TreeItem<>("📊 状态面板");
-        TreeItem<String> chatItem = new TreeItem<>("💬 聊天");
+        TreeItem<String> dbKeyItem = new TreeItem<>("🔐 数据库密钥");
+        TreeItem<String> promptItem = new TreeItem<>("📝 Prompt 管理");
         TreeItem<String> listenItem = new TreeItem<>("👂 私聊监听");
         TreeItem<String> groupItem = new TreeItem<>("👥 群组管理");
-        TreeItem<String> promptItem = new TreeItem<>("📝 Prompt 管理");
-        TreeItem<String> aiItem = new TreeItem<>("🤖 AI 接口");
         TreeItem<String> keywordItem = new TreeItem<>("🔑 关键词回复");
         TreeItem<String> forwardItem = new TreeItem<>("🔀 自定义转发");
         TreeItem<String> scheduleItem = new TreeItem<>("⏰ 定时消息");
         TreeItem<String> friendItem = new TreeItem<>("🤝 新好友");
         TreeItem<String> momentsItem = new TreeItem<>("🌸 朋友圈");
-        TreeItem<String> memoryItem = new TreeItem<>("🧠 记忆管理");
+        TreeItem<String> aiItem = new TreeItem<>("🤖 AI 接口");
 
         root.getChildren().addAll(
-                statusItem, chatItem, listenItem, groupItem, promptItem,
-                aiItem, keywordItem, forwardItem, scheduleItem, friendItem,
-                momentsItem, memoryItem
+                statusItem, dbKeyItem, promptItem, listenItem, groupItem,
+                keywordItem, forwardItem, scheduleItem, friendItem,
+                momentsItem, aiItem
         );
 
-        // 展开所有一级
+        // 展开所有
         root.setExpanded(true);
         statusItem.setExpanded(true);
 
@@ -162,17 +157,16 @@ public class MainController implements Initializable {
      */
     private void initPanels() {
         panels.put("状态面板", createStatusPanel());
-        panels.put("聊天", createChatPanel());
+        panels.put("数据库密钥", createDbKeyPanel());
+        panels.put("Prompt 管理", createPromptPanel());
         panels.put("私聊监听", createListenPanel());
         panels.put("群组管理", createGroupPanel());
-        panels.put("Prompt 管理", createPromptPanel());
-        panels.put("AI 接口", createAiPanel());
         panels.put("关键词回复", createKeywordPanel());
         panels.put("自定义转发", createForwardPanel());
         panels.put("定时消息", createSchedulePanel());
         panels.put("新好友", createFriendPanel());
         panels.put("朋友圈", createMomentsPanel());
-        panels.put("记忆管理", createMemoryPanel());
+        panels.put("AI 接口", createAiPanel());
     }
 
     /**
@@ -187,87 +181,6 @@ public class MainController implements Initializable {
     }
 
     // ==================== 按钮事件 ====================
-
-    /**
-     * 连接/断开微信
-     */
-    @FXML
-    private void onConnect() {
-        if (weChat != null) {
-            // 断开
-            if (botEngine != null && botEngine.isRunning()) {
-                botEngine.stop();
-            }
-            weChat = null;
-            updateStatus(false);
-            appendLog("已断开微信连接");
-            return;
-        }
-
-        // 连接
-        setBusy(true, "正在连接微信...");
-        executor.submit(() -> {
-            try {
-                appendLog("正在初始化微信连接...");
-                // 设置 SDK 日志回调，让内部日志输出到界面
-                io.getbit.WeChat.setLogCallback(msg -> appendLog(msg));
-                weChat = new WeChat();
-                Platform.runLater(() -> {
-                    updateStatus(true);
-                    setBusy(false, "");
-                    appendLog("已连接到微信，昵称: " + weChat.getNickname());
-                });
-            } catch (Exception e) {
-                LOG.log(java.util.logging.Level.WARNING, "连接微信失败", e);
-                Platform.runLater(() -> {
-                    setBusy(false, "");
-                    appendLog("连接微信失败: " + e.getMessage());
-                    showError("连接失败", e.getMessage());
-                });
-            }
-        });
-    }
-
-    /**
-     * 启动/停止机器人
-     */
-    @FXML
-    private void onStartBot() {
-        if (weChat == null) {
-            showError("未连接", "请先连接微信");
-            return;
-        }
-
-        if (botEngine != null && botEngine.isRunning()) {
-            // 停止
-            botEngine.stop();
-            btnStartBot.setText("启动机器人");
-            lblBotStatus.setText("");
-            appendLog("机器人已停止");
-            return;
-        }
-
-        // 启动
-        btnStartBot.setDisable(true);
-        executor.submit(() -> {
-            try {
-                botEngine = new BotEngine(configManager, promptManager);
-                botEngine.setLogCallback(this::appendLog);
-                botEngine.start(weChat);
-                Platform.runLater(() -> {
-                    btnStartBot.setText("停止机器人");
-                    btnStartBot.setDisable(false);
-                    lblBotStatus.setText("🤖 机器人运行中");
-                });
-            } catch (Exception e) {
-                Platform.runLater(() -> {
-                    btnStartBot.setDisable(false);
-                    showError("启动失败", e.getMessage());
-                    appendLog("机器人启动失败: " + e.getMessage());
-                });
-            }
-        });
-    }
 
     /**
      * 清空日志
@@ -289,166 +202,285 @@ public class MainController implements Initializable {
         Label title = new Label("运行状态");
         title.getStyleClass().add("section-title");
 
-        Label lblWxStatus = new Label("微信状态: 未连接");
-        Label lblBotRunStatus = new Label("机器人状态: 未启动");
-        Label lblUptime = new Label("运行时长: -");
-        Label lblMsgCount = new Label("消息统计: 接收 0 / 发送 0");
+        Label lblConfigStatus = new Label("配置状态: 已加载");
+        Label lblConfigDir = new Label("配置目录: " + configManager.getConfigDir());
+        Label lblKeyStatus = new Label();
+
+        // 检查密钥配置状态
+        String rawKey = configManager.getConfig().getWxRawKey();
+        if (rawKey != null && rawKey.length() == 64) {
+            lblKeyStatus.setText("数据库密钥: ✅ 已配置 (" + rawKey.substring(0, 8) + "...)");
+        } else {
+            lblKeyStatus.setText("数据库密钥: ❌ 未配置（请在「数据库密钥」面板提取）");
+        }
 
         // 刷新按钮
         Button btnRefresh = new Button("刷新状态");
         btnRefresh.getStyleClass().add("btn-default");
         btnRefresh.setOnAction(e -> {
-            if (weChat != null) {
-                lblWxStatus.setText("微信状态: 已连接 (" + weChat.getNickname() + ")");
-            }
-            if (botEngine != null && botEngine.isRunning()) {
-                lblBotRunStatus.setText("机器人状态: 运行中");
-                LocalDateTime start = botEngine.getStartTime();
-                if (start != null) {
-                    Duration d = Duration.between(start, LocalDateTime.now());
-                    lblUptime.setText("运行时长: " + d.toHours() + "h " + (d.toMinutes() % 60) + "m");
-                }
-                lblMsgCount.setText("消息统计: 接收 " + botEngine.getTotalMessagesReceived()
-                        + " / 发送 " + botEngine.getTotalMessagesSent());
+            lblConfigStatus.setText("配置状态: 已加载");
+            lblConfigDir.setText("配置目录: " + configManager.getConfigDir());
+            String key = configManager.getConfig().getWxRawKey();
+            if (key != null && key.length() == 64) {
+                lblKeyStatus.setText("数据库密钥: ✅ 已配置 (" + key.substring(0, 8) + "...)");
             } else {
-                lblBotRunStatus.setText("机器人状态: 未启动");
-                lblUptime.setText("运行时长: -");
-                lblMsgCount.setText("消息统计: 接收 0 / 发送 0");
+                lblKeyStatus.setText("数据库密钥: ❌ 未配置（请在「数据库密钥」面板提取）");
             }
         });
 
-        panel.getChildren().addAll(title, lblWxStatus, lblBotRunStatus, lblUptime, lblMsgCount, btnRefresh);
+        panel.getChildren().addAll(title, lblConfigStatus, lblConfigDir, lblKeyStatus, btnRefresh);
         return panel;
     }
 
     /**
-     * 创建聊天面板
+     * 创建数据库密钥面板
      */
-    private Node createChatPanel() {
-        VBox panel = new VBox(10);
+    private Node createDbKeyPanel() {
+        VBox panel = new VBox(12);
         panel.setPadding(new Insets(16));
 
-        Label title = new Label("手动聊天");
+        Label title = new Label("微信数据库密钥提取");
         title.getStyleClass().add("section-title");
 
-        HBox recipientBox = new HBox(6);
-        recipientBox.setAlignment(Pos.CENTER_LEFT);
-        recipientBox.getChildren().addAll(new Label("发送给:"), createTextField("联系人/群名称", 300));
+        Label desc = new Label("操作流程：\n1. 点击「初始化」创建微信无签名副本（首次约需1分钟）\n2. 点击「启动微信并提取密钥」，微信会自动启动，扫码登录后密钥自动提取");
+        desc.setWrapText(true);
+        desc.getStyleClass().add("sub-title");
 
-        TextArea txtMsg = new TextArea();
-        txtMsg.setPromptText("输入消息... (Ctrl+Enter 发送)");
-        txtMsg.setPrefRowCount(5);
-        txtMsg.setWrapText(true);
-        VBox.setVgrow(txtMsg, javafx.scene.layout.Priority.ALWAYS);
+        // 当前密钥状态
+        HBox statusBox = new HBox(8);
+        statusBox.setAlignment(Pos.CENTER_LEFT);
+        Label lblKeyStatus = new Label("当前状态: ");
+        String currentKey = configManager.getConfig().getWxRawKey();
+        if (currentKey != null && currentKey.length() == 64) {
+            lblKeyStatus.setText("当前状态: ✅ 已配置 (" + currentKey.substring(0, 8) + "...)");
+        } else {
+            lblKeyStatus.setText("当前状态: ❌ 未配置");
+        }
 
+        // 密钥显示区
+        Label lblKey = new Label("Raw Key:");
+        TextField txtKey = new TextField();
+        txtKey.setPromptText("64位 hex 密钥，可通过 Frida 自动提取或手动填入");
+        txtKey.setPrefWidth(500);
+        if (currentKey != null && !currentKey.isEmpty()) {
+            txtKey.setText(currentKey);
+        }
+
+        // 按钮区
         HBox btnBox = new HBox(8);
-        btnBox.setAlignment(Pos.CENTER_RIGHT);
-        Button btnSend = new Button("发送");
-        btnSend.getStyleClass().add("btn-success");
-        btnSend.setOnAction(e -> {
-            if (weChat == null) {
-                showError("未连接", "请先连接微信");
+        btnBox.setAlignment(Pos.CENTER_LEFT);
+        Button btnInit = new Button("📦 初始化");
+        btnInit.getStyleClass().add("btn-default");
+        Button btnStartAndExtract = new Button("🚀 启动微信并提取密钥");
+        btnStartAndExtract.getStyleClass().add("btn-primary");
+        Button btnSaveKey = new Button("💾 保存密钥");
+        btnSaveKey.getStyleClass().add("btn-success");
+        Button btnDecrypt = new Button("🔓 初始化数据库");
+        btnDecrypt.getStyleClass().add("btn-success");
+        Button btnTestKey = new Button("🧪 测试密钥");
+        btnTestKey.getStyleClass().add("btn-default");
+
+        // 初始化按钮事件：检查/创建无签名副本
+        btnInit.setOnAction(e -> {
+            btnInit.setDisable(true);
+            btnInit.setText("⏳ 初始化中...");
+            appendLog("正在检查微信无签名副本...");
+
+            executor.submit(() -> {
+                try {
+                    String copyBin = "/tmp/WeChat_copy.app/Contents/MacOS/WeChat";
+                    java.io.File copyFile = new java.io.File(copyBin);
+
+                    if (copyFile.exists()) {
+                        Platform.runLater(() -> {
+                            btnInit.setDisable(false);
+                            btnInit.setText("📦 初始化");
+                            appendLog("✅ 初始化完成：无签名副本已存在");
+                        });
+                        return;
+                    }
+
+                    // 查找原始微信
+                    String[] candidates = {
+                            "/Applications/WeChat.app",
+                            "/Applications/微信.app",
+                            System.getProperty("user.home") + "/Applications/WeChat.app"
+                    };
+                    String originalApp = null;
+                    for (String path : candidates) {
+                        if (new java.io.File(path).exists()) {
+                            originalApp = path;
+                            break;
+                        }
+                    }
+                    if (originalApp == null) {
+                        Platform.runLater(() -> {
+                            btnInit.setDisable(false);
+                            btnInit.setText("📦 初始化");
+                            appendLog("❌ 未找到微信安装");
+                            showError("初始化失败", "未找到微信安装，请确保已安装微信");
+                        });
+                        return;
+                    }
+
+                    appendLog("正在拷贝微信到 /tmp 并移除签名（约需1分钟）...");
+
+                    // 删除旧副本
+                    new ProcessBuilder("rm", "-rf", "/tmp/WeChat_copy.app").start().waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+
+                    // 拷贝
+                    Process cpProc = new ProcessBuilder("cp", "-R", originalApp, "/tmp/WeChat_copy.app").start();
+                    cpProc.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    if (cpProc.exitValue() != 0) {
+                        throw new RuntimeException("拷贝微信失败");
+                    }
+
+                    // 移除签名
+                    Process signProc = new ProcessBuilder("codesign", "--remove-signature", "/tmp/WeChat_copy.app").start();
+                    signProc.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+                    if (signProc.exitValue() != 0) {
+                        throw new RuntimeException("移除签名失败");
+                    }
+
+                    Platform.runLater(() -> {
+                        btnInit.setDisable(false);
+                        btnInit.setText("📦 初始化");
+                        appendLog("✅ 初始化完成：无签名副本已创建");
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> {
+                        btnInit.setDisable(false);
+                        btnInit.setText("📦 初始化");
+                        appendLog("❌ 初始化失败: " + ex.getMessage());
+                        showError("初始化失败", ex.getMessage());
+                    });
+                }
+            });
+        });
+
+        // 启动微信并提取密钥（spawn 模式：frida 启动微信副本，hook PBKDF，用户扫码登录后自动提取）
+        btnStartAndExtract.setOnAction(e -> {
+            btnStartAndExtract.setDisable(true);
+            btnStartAndExtract.setText("⏳ 启动中...");
+            appendLog("⚠️ 将通过 Frida 启动微信并提取密钥，请准备扫码登录...");
+
+            executor.submit(() -> {
+                try {
+                    FridaKeyExtractor extractor = new FridaKeyExtractor();
+                    String key = extractor.extractKey();
+
+                    Platform.runLater(() -> {
+                        btnStartAndExtract.setDisable(false);
+                        btnStartAndExtract.setText("🚀 启动微信并提取密钥");
+                        if (key != null) {
+                            txtKey.setText(key);
+                            lblKeyStatus.setText("当前状态: ✅ 已提取 (" + key.substring(0, 8) + "...)");
+                            appendLog("密钥提取成功: " + key.substring(0, 8) + "...");
+                            configManager.getConfig().setWxRawKey(key);
+                            configManager.save();
+                            appendLog("密钥已自动保存到配置文件");
+                        } else {
+                            appendLog("密钥提取失败");
+                            showError("提取失败", "无法提取密钥，请确保:\n1. 已点击「初始化」创建无签名副本\n2. frida CLI 已安装 (brew install frida-tools)");
+                        }
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> {
+                        btnStartAndExtract.setDisable(false);
+                        btnStartAndExtract.setText("🚀 启动微信并提取密钥");
+                        appendLog("提取异常: " + ex.getMessage());
+                        showError("提取异常", ex.getMessage());
+                    });
+                }
+            });
+        });
+
+        // 保存按钮事件
+        btnSaveKey.setOnAction(e -> {
+            String key = txtKey.getText().trim();
+            if (key.length() != 64 || !key.matches("[0-9a-f]{64}")) {
+                showError("格式错误", "密钥必须是 64 位 hex 字符串（0-9, a-f）");
                 return;
             }
-            // TODO: 获取收件人和消息内容并发送
-            appendLog("发送消息功能待完善");
-        });
-        btnBox.getChildren().add(btnSend);
-
-        panel.getChildren().addAll(title, recipientBox, txtMsg, btnBox);
-        return panel;
-    }
-
-    /**
-     * 创建私聊监听面板
-     */
-    private Node createListenPanel() {
-        VBox panel = new VBox(10);
-        panel.setPadding(new Insets(16));
-
-        Label title = new Label("私聊监听配置");
-        title.getStyleClass().add("section-title");
-
-        CheckBox chkAllListen = new CheckBox("全局监听模式（黑名单）");
-        CheckBox chkListenOnly = new CheckBox("只监听不回复");
-
-        Label lblListenList = new Label("监听用户列表:");
-        lblListenList.getStyleClass().add("sub-title");
-        TextArea txtListenList = new TextArea();
-        txtListenList.setPromptText("每行一个用户昵称");
-        txtListenList.setPrefRowCount(8);
-
-        Button btnSave = new Button("保存配置");
-        btnSave.getStyleClass().add("btn-success");
-        btnSave.setOnAction(e -> {
-            AppConfig cfg = configManager.getConfig();
-            cfg.setAllListenSwitch(chkAllListen.isSelected());
-            cfg.setChatListenOnly(chkListenOnly.isSelected());
-            String[] lines = txtListenList.getText().split("\n");
-            List<String> list = new ArrayList<>();
-            for (String line : lines) {
-                String trimmed = line.trim();
-                if (!trimmed.isEmpty()) list.add(trimmed);
-            }
-            cfg.setListenList(list);
+            configManager.getConfig().setWxRawKey(key);
             configManager.save();
-            appendLog("私聊监听配置已保存");
+            lblKeyStatus.setText("当前状态: ✅ 已配置 (" + key.substring(0, 8) + "...)");
+            appendLog("密钥已保存到配置文件");
         });
 
-        panel.getChildren().addAll(title, chkAllListen, chkListenOnly, lblListenList, txtListenList, btnSave);
-        return panel;
-    }
-
-    /**
-     * 创建群组管理面板
-     */
-    private Node createGroupPanel() {
-        VBox panel = new VBox(10);
-        panel.setPadding(new Insets(16));
-
-        Label title = new Label("群组管理配置");
-        title.getStyleClass().add("section-title");
-
-        CheckBox chkGroupSwitch = new CheckBox("群聊监听总开关");
-        CheckBox chkGroupListenOnly = new CheckBox("群聊只监听不回复");
-        CheckBox chkGroupReplyAt = new CheckBox("仅被 @ 时回复");
-        CheckBox chkGroupReplyAtMsg = new CheckBox("回复时 @ 发言人");
-        CheckBox chkGroupReplyQuote = new CheckBox("回复时引用原消息");
-        CheckBox chkGroupWelcome = new CheckBox("开启群新人欢迎语");
-
-        TextField txtWelcomeMsg = createTextField("欢迎语内容", 400);
-
-        Label lblGroups = new Label("监听群组列表:");
-        lblGroups.getStyleClass().add("sub-title");
-        TextArea txtGroups = new TextArea();
-        txtGroups.setPromptText("每行一个群聊名称");
-        txtGroups.setPrefRowCount(6);
-
-        Button btnSave = new Button("保存配置");
-        btnSave.getStyleClass().add("btn-success");
-        btnSave.setOnAction(e -> {
-            AppConfig cfg = configManager.getConfig();
-            cfg.setGroupSwitch(chkGroupSwitch.isSelected());
-            cfg.setGroupListenOnly(chkGroupListenOnly.isSelected());
-            cfg.setGroupReplyAt(chkGroupReplyAt.isSelected());
-            cfg.setGroupReplyAtMsg(chkGroupReplyAtMsg.isSelected());
-            cfg.setGroupReplyQuote(chkGroupReplyQuote.isSelected());
-            cfg.setGroupWelcome(chkGroupWelcome.isSelected());
-            cfg.setGroupWelcomeMsg(txtWelcomeMsg.getText());
-            String[] lines = txtGroups.getText().split("\n");
-            List<String> list = new ArrayList<>();
-            for (String line : lines) {
-                String trimmed = line.trim();
-                if (!trimmed.isEmpty()) list.add(trimmed);
+        // 初始化数据库按钮事件（直接连接加密 DB，无需解密）
+        btnDecrypt.setOnAction(e -> {
+            String key = txtKey.getText().trim();
+            if (key.length() != 64) {
+                showError("未配置", "请先提取或输入 64 位 hex 密钥");
+                return;
             }
-            cfg.setGroup(list);
-            configManager.save();
-            appendLog("群组管理配置已保存");
+            btnDecrypt.setDisable(true);
+            btnDecrypt.setText("⏳ 初始化中...");
+            appendLog("正在初始化数据库连接...");
+
+            executor.submit(() -> {
+                try {
+                    AppConfig cfg = configManager.getConfig();
+                    WeChatDBConfig dbConfig = WeChatDBConfig.fromRawKey(key)
+                            .wechatDataDir(cfg.getWxDataDir());
+
+                    Platform.runLater(() -> appendLog("正在连接加密数据库..."));
+
+                    // 直接初始化 WeChatDB（通过 sqlite-jdbc-crypt 连接加密 DB）
+                    weChatDB = new WeChatDB(dbConfig);
+                    weChatDB.init();
+                    messageMonitor = new MessageMonitor(weChatDB);
+
+                    // 设置新消息回调
+                    messageMonitor.setOnNewMessage(mm -> Platform.runLater(() -> {
+                        if (txtMonitorMessages != null) {
+                            txtMonitorMessages.appendText(mm.toDisplayString() + "\n");
+                            txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
+                        }
+                        appendLog("📩 [" + mm.getChatDisplayName() + "] " +
+                                mm.getSenderDisplayName() + ": " +
+                                (mm.getContent() != null && mm.getContent().length() > 50
+                                        ? mm.getContent().substring(0, 50) + "..."
+                                        : mm.getContent()));
+                    }));
+
+                    Platform.runLater(() -> {
+                        btnDecrypt.setDisable(false);
+                        btnDecrypt.setText("🔓 初始化数据库");
+                        appendLog("✅ 数据库连接已就绪，可以直接查询和监听消息");
+                    });
+                } catch (Exception ex) {
+                    StringBuilder errMsg = new StringBuilder();
+                    Throwable t = ex;
+                    while (t != null) {
+                        if (errMsg.length() > 0) errMsg.append(" → ");
+                        errMsg.append(t.getClass().getSimpleName()).append(": ").append(t.getMessage());
+                        t = t.getCause();
+                    }
+                    final String finalErr = errMsg.toString();
+                    Platform.runLater(() -> {
+                        btnDecrypt.setDisable(false);
+                        btnDecrypt.setText("🔓 初始化数据库");
+                        appendLog("❌ 初始化失败: " + finalErr);
+                        showError("初始化失败", finalErr);
+                    });
+                }
+            });
         });
 
-        panel.getChildren().addAll(title, chkGroupSwitch, chkGroupListenOnly, chkGroupReplyAt,
-                chkGroupReplyAtMsg, chkGroupReplyQuote, chkGroupWelcome, txtWelcomeMsg,
-                lblGroups, txtGroups, btnSave);
+        // 测试按钮事件
+        btnTestKey.setOnAction(e -> {
+            String key = txtKey.getText().trim();
+            if (key.length() != 64) {
+                showError("未配置", "请先提取或输入密钥");
+                return;
+            }
+            appendLog("密钥格式验证通过: " + key.substring(0, 8) + "...");
+        });
+
+        btnBox.getChildren().addAll(btnInit, btnStartAndExtract, btnSaveKey, btnDecrypt, btnTestKey);
+        panel.getChildren().addAll(title, desc, statusBox, lblKey, txtKey, btnBox);
         return panel;
     }
 
@@ -526,42 +558,234 @@ public class MainController implements Initializable {
     }
 
     /**
-     * 创建 AI 接口面板
+     * 创建私聊监听面板
      */
-    private Node createAiPanel() {
+    private Node createListenPanel() {
         VBox panel = new VBox(10);
         panel.setPadding(new Insets(16));
 
-        Label title = new Label("AI 接口配置");
+        Label title = new Label("私聊消息监听");
         title.getStyleClass().add("section-title");
 
-        Label lblApiList = new Label("接口列表（当前仅支持 OpenAI 兼容格式）:");
-        lblApiList.getStyleClass().add("sub-title");
+        // ===== 搜索联系人区域 =====
+        Label lblSearch = new Label("搜索联系人:");
+        lblSearch.getStyleClass().add("sub-title");
+        HBox searchBox = new HBox(8);
+        searchBox.setAlignment(Pos.CENTER_LEFT);
+        TextField txtSearchContact = createTextField("输入昵称或备注搜索", 250);
+        Button btnSearch = new Button("🔍 搜索");
+        btnSearch.getStyleClass().add("btn-default");
+        searchBox.getChildren().addAll(txtSearchContact, btnSearch);
 
-        TextArea txtApiConfigs = new TextArea();
-        txtApiConfigs.setPromptText("每行一个接口配置，格式: API_KEY|BASE_URL|MODEL\n例: sk-xxx|https://api.openai.com/v1|gpt-4o");
-        txtApiConfigs.setPrefRowCount(6);
+        // 搜索结果列表
+        ListView<String> lstSearchResults = new ListView<>();
+        lstSearchResults.setPrefHeight(120);
 
-        HBox indexBox = new HBox(6);
-        indexBox.setAlignment(Pos.CENTER_LEFT);
-        TextField txtApiIndex = createTextField("默认接口索引 (0开始)", 100);
+        // ===== 监听控制区域 =====
+        HBox controlBox = new HBox(8);
+        controlBox.setAlignment(Pos.CENTER_LEFT);
+        Button btnStartMonitor = new Button("▶ 开始监听");
+        btnStartMonitor.getStyleClass().add("btn-success");
+        Button btnStopMonitor = new Button("⏹ 停止监听");
+        btnStopMonitor.getStyleClass().add("btn-danger");
+        Button btnRefresh = new Button("🔄 刷新消息");
+        btnRefresh.getStyleClass().add("btn-default");
+        controlBox.getChildren().addAll(btnStartMonitor, btnStopMonitor, btnRefresh);
 
-        HBox btnBox = new HBox(8);
-        Button btnSave = new Button("保存");
-        Button btnTest = new Button("测试接口");
+        // 监听列表
+        Label lblMonitored = new Label("监听中的联系人:");
+        lblMonitored.getStyleClass().add("sub-title");
+        lstMonitoredContacts = new ListView<>();
+        lstMonitoredContacts.setPrefHeight(80);
+
+        // ===== 消息显示区域 =====
+        Label lblMessages = new Label("消息记录:");
+        lblMessages.getStyleClass().add("sub-title");
+        txtMonitorMessages = new TextArea();
+        txtMonitorMessages.setEditable(false);
+        txtMonitorMessages.setWrapText(true);
+        txtMonitorMessages.setPrefRowCount(15);
+        VBox.setVgrow(txtMonitorMessages, javafx.scene.layout.Priority.ALWAYS);
+
+        // ===== 事件绑定 =====
+        btnSearch.setOnAction(e -> {
+            if (weChatDB == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            String keyword = txtSearchContact.getText().trim();
+            List<Contact> contacts = messageMonitor.searchContacts(keyword);
+            lstSearchResults.getItems().clear();
+            for (Contact c : contacts) {
+                String display = c.getDisplayName() + " (" + c.getUsername() + ")";
+                lstSearchResults.getItems().add(display);
+            }
+            appendLog("搜索到 " + contacts.size() + " 个联系人");
+        });
+
+        btnStartMonitor.setOnAction(e -> {
+            if (weChatDB == null || messageMonitor == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            String selected = lstSearchResults.getSelectionModel().getSelectedItem();
+            if (selected == null) {
+                showError("未选择", "请先搜索并选择一个联系人");
+                return;
+            }
+            // 提取 username
+            String username = extractUsername(selected);
+            if (username != null) {
+                messageMonitor.startMonitoring(username);
+                refreshMonitoredList();
+                appendLog("✅ 开始监听: " + selected);
+                // 立即拉取一次最新消息
+                loadMessagesForContact(username);
+            }
+        });
+
+        btnStopMonitor.setOnAction(e -> {
+            if (messageMonitor == null) return;
+            String selected = lstMonitoredContacts.getSelectionModel().getSelectedItem();
+            if (selected == null) {
+                showError("未选择", "请先选择要停止监听的联系人");
+                return;
+            }
+            String username = extractUsername(selected);
+            if (username != null) {
+                messageMonitor.stopMonitoring(username);
+                refreshMonitoredList();
+                appendLog("⏹ 停止监听: " + selected);
+            }
+        });
+
+        btnRefresh.setOnAction(e -> {
+            if (messageMonitor == null) return;
+            String selected = lstMonitoredContacts.getSelectionModel().getSelectedItem();
+            if (selected != null) {
+                String username = extractUsername(selected);
+                if (username != null) {
+                    loadMessagesForContact(username);
+                }
+            }
+        });
+
+        // 点击监听列表时加载消息
+        lstMonitoredContacts.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal != null && messageMonitor != null) {
+                String username = extractUsername(newVal);
+                if (username != null) {
+                    loadMessagesForContact(username);
+                }
+            }
+        });
+
+        panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
+                controlBox, lblMonitored, lstMonitoredContacts, lblMessages, txtMonitorMessages);
+        return panel;
+    }
+
+    /**
+     * 从显示文本中提取 username
+     */
+    private String extractUsername(String displayText) {
+        if (displayText == null) return null;
+        int start = displayText.lastIndexOf('(');
+        int end = displayText.lastIndexOf(')');
+        if (start >= 0 && end > start) {
+            return displayText.substring(start + 1, end);
+        }
+        return displayText;
+    }
+
+    /**
+     * 刷新监听列表
+     */
+    private void refreshMonitoredList() {
+        if (lstMonitoredContacts == null || messageMonitor == null) return;
+        lstMonitoredContacts.getItems().clear();
+        for (String username : messageMonitor.getMonitoredUsernames()) {
+            try {
+                Contact c = weChatDB.getContact(username);
+                String display = (c != null ? c.getDisplayName() : username) + " (" + username + ")";
+                lstMonitoredContacts.getItems().add(display);
+            } catch (Exception e) {
+                lstMonitoredContacts.getItems().add(username);
+            }
+        }
+    }
+
+    /**
+     * 加载指定联系人的最新消息
+     */
+    private void loadMessagesForContact(String username) {
+        if (messageMonitor == null) return;
+        executor.submit(() -> {
+            try {
+                var messages = messageMonitor.fetchRecentMessages(username, 50);
+                Platform.runLater(() -> {
+                    txtMonitorMessages.clear();
+                    for (var mm : messages) {
+                        txtMonitorMessages.appendText(mm.toDisplayString() + "\n");
+                    }
+                    txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> appendLog("❗ 加载消息失败: " + e.getMessage()));
+            }
+        });
+    }
+
+    /**
+     * 创建群组管理面板
+     */
+    private Node createGroupPanel() {
+        VBox panel = new VBox(10);
+        panel.setPadding(new Insets(16));
+
+        Label title = new Label("群组管理配置");
+        title.getStyleClass().add("section-title");
+
+        CheckBox chkGroupSwitch = new CheckBox("群聊监听总开关");
+        CheckBox chkGroupListenOnly = new CheckBox("群聊只监听不回复");
+        CheckBox chkGroupReplyAt = new CheckBox("仅被 @ 时回复");
+        CheckBox chkGroupReplyAtMsg = new CheckBox("回复时 @ 发言人");
+        CheckBox chkGroupReplyQuote = new CheckBox("回复时引用原消息");
+        CheckBox chkGroupWelcome = new CheckBox("开启群新人欢迎语");
+
+        TextField txtWelcomeMsg = createTextField("欢迎语内容", 400);
+
+        Label lblGroups = new Label("监听群组列表:");
+        lblGroups.getStyleClass().add("sub-title");
+        TextArea txtGroups = new TextArea();
+        txtGroups.setPromptText("每行一个群聊名称");
+        txtGroups.setPrefRowCount(6);
+
+        Button btnSave = new Button("保存配置");
         btnSave.getStyleClass().add("btn-success");
-        btnTest.getStyleClass().add("btn-default");
-
         btnSave.setOnAction(e -> {
-            appendLog("AI 接口配置已保存");
+            AppConfig cfg = configManager.getConfig();
+            cfg.setGroupSwitch(chkGroupSwitch.isSelected());
+            cfg.setGroupListenOnly(chkGroupListenOnly.isSelected());
+            cfg.setGroupReplyAt(chkGroupReplyAt.isSelected());
+            cfg.setGroupReplyAtMsg(chkGroupReplyAtMsg.isSelected());
+            cfg.setGroupReplyQuote(chkGroupReplyQuote.isSelected());
+            cfg.setGroupWelcome(chkGroupWelcome.isSelected());
+            cfg.setGroupWelcomeMsg(txtWelcomeMsg.getText());
+            String[] lines = txtGroups.getText().split("\n");
+            List<String> list = new ArrayList<>();
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (!trimmed.isEmpty()) list.add(trimmed);
+            }
+            cfg.setGroup(list);
             configManager.save();
-        });
-        btnTest.setOnAction(e -> {
-            appendLog("接口测试功能待实现");
+            appendLog("群组管理配置已保存");
         });
 
-        btnBox.getChildren().addAll(btnSave, btnTest);
-        panel.getChildren().addAll(title, lblApiList, txtApiConfigs, indexBox, btnBox);
+        panel.getChildren().addAll(title, chkGroupSwitch, chkGroupListenOnly, chkGroupReplyAt,
+                chkGroupReplyAtMsg, chkGroupReplyQuote, chkGroupWelcome, txtWelcomeMsg,
+                lblGroups, txtGroups, btnSave);
         return panel;
     }
 
@@ -577,7 +801,7 @@ public class MainController implements Initializable {
 
         CheckBox chkChatKeyword = new CheckBox("开启私聊关键词回复");
         CheckBox chkGroupKeyword = new CheckBox("开启群聊关键词回复");
-        CheckBox chkGroupAtOnly = new CheckBox("群聊仅 @ 时触发");
+        CheckBox chkGroupAtOnly = new CheckBox("群聊关键词回复是否仅 @ 时触发");
 
         Label lblKeywords = new Label("关键词字典（每行格式: 关键词=回复内容）:");
         lblKeywords.getStyleClass().add("sub-title");
@@ -758,69 +982,42 @@ public class MainController implements Initializable {
     }
 
     /**
-     * 创建记忆管理面板
+     * 创建 AI 接口面板
      */
-    private Node createMemoryPanel() {
+    private Node createAiPanel() {
         VBox panel = new VBox(10);
         panel.setPadding(new Insets(16));
 
-        Label title = new Label("对话记忆管理");
+        Label title = new Label("AI 接口配置");
         title.getStyleClass().add("section-title");
 
-        CheckBox chkMemory = new CheckBox("开启对话记忆");
+        Label lblApiList = new Label("接口列表（当前仅支持 OpenAI 兼容格式）:");
+        lblApiList.getStyleClass().add("sub-title");
 
-        HBox countBox = new HBox(10);
-        countBox.setAlignment(Pos.CENTER_LEFT);
-        TextField txtMaxCount = createTextField("最大存储条数", 100);
-        TextField txtContextCount = createTextField("AI 带入条数", 100);
-        countBox.getChildren().addAll(new Label("最大存储:"), txtMaxCount, new Label("AI 带入:"), txtContextCount);
+        TextArea txtApiConfigs = new TextArea();
+        txtApiConfigs.setPromptText("每行一个接口配置，格式: API_KEY|BASE_URL|MODEL\n例: sk-xxx|https://api.openai.com/v1|gpt-4o");
+        txtApiConfigs.setPrefRowCount(6);
 
-        ListView<String> memoryList = new ListView<>();
-        memoryList.setPrefHeight(200);
+        HBox indexBox = new HBox(6);
+        indexBox.setAlignment(Pos.CENTER_LEFT);
+        TextField txtApiIndex = createTextField("默认接口索引 (0开始)", 100);
 
         HBox btnBox = new HBox(8);
-        Button btnRefresh = new Button("刷新列表");
-        Button btnClearOne = new Button("清除选中");
-        Button btnClearAll = new Button("清除全部");
-        btnRefresh.getStyleClass().add("btn-default");
-        btnClearOne.getStyleClass().add("btn-danger");
-        btnClearAll.getStyleClass().add("btn-danger");
-
-        btnRefresh.setOnAction(e -> {
-            if (botEngine != null && botEngine.getMemoryManager() != null) {
-                List<String> names = botEngine.getMemoryManager().listChatNames();
-                memoryList.getItems().setAll(names);
-            }
-        });
-        btnClearOne.setOnAction(e -> {
-            String selected = memoryList.getSelectionModel().getSelectedItem();
-            if (selected != null && botEngine != null && botEngine.getMemoryManager() != null) {
-                botEngine.getMemoryManager().clearMemory(selected);
-                memoryList.getItems().remove(selected);
-                appendLog("已清除记忆: " + selected);
-            }
-        });
-        btnClearAll.setOnAction(e -> {
-            if (botEngine != null && botEngine.getMemoryManager() != null) {
-                botEngine.getMemoryManager().clearAllMemory();
-                memoryList.getItems().clear();
-                appendLog("已清除全部记忆");
-            }
-        });
-
-        Button btnSave = new Button("保存配置");
+        Button btnSave = new Button("保存");
+        Button btnTest = new Button("测试接口");
         btnSave.getStyleClass().add("btn-success");
+        btnTest.getStyleClass().add("btn-default");
+
         btnSave.setOnAction(e -> {
-            AppConfig cfg = configManager.getConfig();
-            cfg.setMemorySwitch(chkMemory.isSelected());
-            try { cfg.setMemoryMaxCount(Integer.parseInt(txtMaxCount.getText())); } catch (NumberFormatException ex) {}
-            try { cfg.setMemoryContextCount(Integer.parseInt(txtContextCount.getText())); } catch (NumberFormatException ex) {}
+            appendLog("AI 接口配置已保存");
             configManager.save();
-            appendLog("记忆配置已保存");
+        });
+        btnTest.setOnAction(e -> {
+            appendLog("接口测试功能待实现");
         });
 
-        btnBox.getChildren().addAll(btnRefresh, btnClearOne, btnClearAll, btnSave);
-        panel.getChildren().addAll(title, chkMemory, countBox, memoryList, btnBox);
+        btnBox.getChildren().addAll(btnSave, btnTest);
+        panel.getChildren().addAll(title, lblApiList, txtApiConfigs, indexBox, btnBox);
         return panel;
     }
 
@@ -835,34 +1032,6 @@ public class MainController implements Initializable {
 
     private void refreshPromptList(ListView<String> listView) {
         listView.getItems().setAll(promptManager.listPromptNames());
-    }
-
-    private void updateStatus(boolean connected) {
-        if (connected) {
-            lblStatus.setText("● 已连接");
-            lblStatus.getStyleClass().removeAll("status-disconnected");
-            lblStatus.getStyleClass().add("status-connected");
-            btnConnect.setText("断开");
-            btnStartBot.setDisable(false);
-        } else {
-            lblStatus.setText("○ 未连接");
-            lblStatus.getStyleClass().removeAll("status-connected");
-            lblStatus.getStyleClass().add("status-disconnected");
-            btnConnect.setText("连接微信");
-            btnStartBot.setDisable(true);
-            btnStartBot.setText("启动机器人");
-            lblBotStatus.setText("");
-        }
-    }
-
-    private void setBusy(boolean busy, String text) {
-        if (busy) {
-            lblStatus.setText("⏳ " + text);
-            btnConnect.setDisable(true);
-        } else {
-            btnConnect.setDisable(false);
-            updateStatus(weChat != null);
-        }
     }
 
     private void appendLog(String message) {

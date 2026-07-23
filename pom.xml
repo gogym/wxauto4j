@@ -16,7 +16,6 @@
 
   <modules>
     <module>wxauto4j-lib</module>
-    <module>wxauto4j-gui-win</module>
     <module>wxauto4j-gui-mac</module>
   </modules>
 
@@ -67,6 +66,11 @@
         <artifactId>junit</artifactId>
         <version>4.13.2</version>
         <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.github.willena</groupId>
+        <artifactId>sqlite-jdbc</artifactId>
+        <version>3.50.1.0</version>
       </dependency>
     </dependencies>
   </dependencyManagement>

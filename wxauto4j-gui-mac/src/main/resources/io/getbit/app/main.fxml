@@ -16,12 +16,8 @@
             <padding>
                 <Insets top="8" right="12" bottom="8" left="12"/>
             </padding>
-            <Button fx:id="btnConnect" text="连接微信" onAction="#onConnect" styleClass="btn-primary"/>
-            <Button fx:id="btnStartBot" text="启动机器人" onAction="#onStartBot" styleClass="btn-success" disable="true"/>
-            <Separator orientation="VERTICAL"/>
-            <Label fx:id="lblStatus" text="○ 未连接" styleClass="status-disconnected"/>
+            <Label fx:id="lblStatus" text="● 就绪" styleClass="status-connected"/>
             <Region HBox.hgrow="ALWAYS"/>
-            <Label fx:id="lblBotStatus" text="" styleClass="bot-status"/>
         </HBox>
     </top>
 

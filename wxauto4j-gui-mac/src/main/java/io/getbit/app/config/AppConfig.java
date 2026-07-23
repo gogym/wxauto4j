@@ -13,6 +13,18 @@ import java.util.Map;
  */
 public class AppConfig {
 
+    // ==================== 微信数据库密钥 ====================
+
+    /** 微信 SQLCipher raw key（64字符 hex），通过 Frida 提取得到 */
+    private String wxRawKey = "";
+
+    /** 微信数据目录（xwechat_files），用于定位加密数据库 */
+    private String wxDataDir = System.getProperty("user.home")
+            + "/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files";
+
+    /** 解密后数据库输出目录 */
+    private String wxDecryptedDbDir = "/tmp/wx_decrypted_java";
+
     // ==================== AI 接口 ====================
 
     /** AI 接口配置列表 */
@@ -263,6 +275,15 @@ public class AppConfig {
     private int groupSplitMaxCount = 4;
 
     // ==================== Getter / Setter ====================
+
+    public String getWxRawKey() { return wxRawKey; }
+    public void setWxRawKey(String wxRawKey) { this.wxRawKey = wxRawKey; }
+
+    public String getWxDataDir() { return wxDataDir; }
+    public void setWxDataDir(String wxDataDir) { this.wxDataDir = wxDataDir; }
+
+    public String getWxDecryptedDbDir() { return wxDecryptedDbDir; }
+    public void setWxDecryptedDbDir(String wxDecryptedDbDir) { this.wxDecryptedDbDir = wxDecryptedDbDir; }
 
     public List<ApiConfig> getApiConfigs() { return apiConfigs; }
     public void setApiConfigs(List<ApiConfig> apiConfigs) { this.apiConfigs = apiConfigs; }
