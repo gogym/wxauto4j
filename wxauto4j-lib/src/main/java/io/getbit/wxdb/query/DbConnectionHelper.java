@@ -13,8 +13,9 @@ import java.util.logging.Logger;
  * 统一管理连接的创建、PRAGMA 优化配置、有效性检查和自动重连。
  * 所有 Query 类共享此管理器，避免重复的连接管理代码。
  * <p>
- * 提供轮询连接池：预创建多个连接，轮询时从池中获取，用完后关闭并异步补充。
- * 解决 WAL 模式下共享连接无法看到其他进程新数据的问题。
+ * 提供轮询连接池：预创建多个连接，轮询时从池中获取，用完后关闭并异步补充新连接。
+ * 连接不复用，因为 SQLite 每个连接维护独立的 page cache，WAL 模式下
+ * 其他进程（微信）写入的数据不会更新已缓存的 change counter，导致复用连接看不到新数据。
  */
 public class DbConnectionHelper {
 
@@ -64,7 +65,9 @@ public class DbConnectionHelper {
     }
 
     /**
-     * 归还轮询连接：关闭旧连接，异步补充池中连接。
+     * 释放轮询连接：关闭连接，异步补充新连接到池中。
+     * 连接不能复用，因为 SQLite 每个连接维护独立的 page cache，
+     * WAL 模式下其他进程写入不会更新已缓存的 change counter。
      */
     public void releasePollConnection(Connection conn) {
         if (conn != null) {
@@ -74,8 +77,7 @@ public class DbConnectionHelper {
         if (pollPool.size() < POOL_SIZE) {
             Thread filler = new Thread(() -> {
                 try {
-                    Connection newConn = createOptimizedConnection();
-                    pollPool.offer(newConn);
+                    pollPool.offer(createOptimizedConnection());
                 } catch (SQLException e) {
                     LOG.log(Level.WARNING, "轮询连接池补充失败", e);
                 }

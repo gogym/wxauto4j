@@ -145,8 +145,8 @@ public class MessageMonitor {
             System.out.println("[监听] 轮询任务已在运行");
             return;
         }
-        System.out.println("[监听] 创建轮询任务，间隔1秒");
-        pollTask = scheduler.scheduleWithFixedDelay(this::pollNewMessages, 1, 1, TimeUnit.SECONDS);
+        System.out.println("[监听] 创建轮询任务，间隔5秒");
+        pollTask = scheduler.scheduleWithFixedDelay(this::pollNewMessages, 1, 5, TimeUnit.SECONDS);
     }
 
     private void pollNewMessages() {
