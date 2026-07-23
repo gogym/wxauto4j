@@ -289,26 +289,14 @@ public class MessageQuery {
     }
 
     private List<ChatMessage> queryMessages(TableRef ref, String sql, Object[] params) {
-        return queryMessages(getHelper(ref.jdbcUrl), sql, params);
-    }
-
-    private List<ChatMessage> queryMessages(DbConnectionHelper helper, String sql, Object[] params) {
+        // 使用轮询连接池的独立连接，避免共享连接的 WAL page cache 陈旧导致 SQLITE_CORRUPT
+        DbConnectionHelper helper = getHelper(ref.jdbcUrl);
+        Connection conn = null;
         List<ChatMessage> messages = new ArrayList<>();
         try {
-            Connection conn = helper.getConnection();
+            conn = helper.acquirePollConnection();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (int i = 0; i < params.length; i++) {
-                    Object p = params[i];
-                    if (p instanceof Long) {
-                        ps.setLong(i + 1, (Long) p);
-                    } else if (p instanceof Integer) {
-                        ps.setInt(i + 1, (Integer) p);
-                    } else if (p instanceof String) {
-                        ps.setString(i + 1, (String) p);
-                    } else {
-                        ps.setObject(i + 1, p);
-                    }
-                }
+                setParams(ps, params);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         messages.add(mapMessage(rs));
@@ -317,8 +305,47 @@ public class MessageQuery {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Message query failed: " + e.getMessage(), e);
+        } finally {
+            helper.releasePollConnection(conn);
         }
         return messages;
+    }
+
+    private List<ChatMessage> queryMessages(DbConnectionHelper helper, String sql, Object[] params) {
+        // 使用轮询连接池的独立连接，避免共享连接的 WAL page cache 陈旧导致 SQLITE_CORRUPT
+        Connection conn = null;
+        List<ChatMessage> messages = new ArrayList<>();
+        try {
+            conn = helper.acquirePollConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                setParams(ps, params);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        messages.add(mapMessage(rs));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Message query failed: " + e.getMessage(), e);
+        } finally {
+            helper.releasePollConnection(conn);
+        }
+        return messages;
+    }
+
+    private void setParams(PreparedStatement ps, Object[] params) throws SQLException {
+        for (int i = 0; i < params.length; i++) {
+            Object p = params[i];
+            if (p instanceof Long) {
+                ps.setLong(i + 1, (Long) p);
+            } else if (p instanceof Integer) {
+                ps.setInt(i + 1, (Integer) p);
+            } else if (p instanceof String) {
+                ps.setString(i + 1, (String) p);
+            } else {
+                ps.setObject(i + 1, p);
+            }
+        }
     }
 
     private ChatMessage mapMessage(ResultSet rs) throws SQLException {
