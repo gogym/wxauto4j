@@ -11,12 +11,10 @@ import java.util.List;
  */
 public class ContactQuery {
 
-    private final String jdbcUrl;
-    private final String derivedKey;
+    private final DbConnectionHelper connHelper;
 
     public ContactQuery(String jdbcUrl, String derivedKey) {
-        this.jdbcUrl = jdbcUrl;
-        this.derivedKey = derivedKey;
+        this.connHelper = new DbConnectionHelper(jdbcUrl);
     }
 
     /**
@@ -24,6 +22,13 @@ public class ContactQuery {
      */
     public List<Contact> getAll() {
         return query("SELECT * FROM contact ORDER BY nick_name", new Object[]{});
+    }
+
+    /**
+     * 查询最近 N 个联系人（按昵称排序）
+     */
+    public List<Contact> getRecent(int limit) {
+        return query("SELECT * FROM contact ORDER BY nick_name LIMIT ?", new Object[]{limit});
     }
 
     /**
@@ -85,29 +90,37 @@ public class ContactQuery {
      * 查询联系人总数
      */
     public int count() {
-        try (Connection conn = openConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT count(*) FROM contact")) {
-            return rs.next() ? rs.getInt(1) : 0;
+        try {
+            Connection conn = getConnection();
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT count(*) FROM contact")) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
         } catch (SQLException e) {
             throw new RuntimeException("Contact count failed: " + e.getMessage(), e);
         }
     }
 
-    private Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(jdbcUrl);
+    private Connection getConnection() throws SQLException {
+        return connHelper.getConnection();
+    }
+
+    public void close() {
+        connHelper.close();
     }
 
     private List<Contact> query(String sql, Object[] params) {
         List<Contact> contacts = new ArrayList<>();
-        try (Connection conn = openConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < params.length; i++) {
-                ps.setObject(i + 1, params[i]);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    contacts.add(mapContact(rs));
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    ps.setObject(i + 1, params[i]);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        contacts.add(mapContact(rs));
+                    }
                 }
             }
         } catch (SQLException e) {

@@ -11,12 +11,10 @@ import java.util.List;
  */
 public class SessionQuery {
 
-    private final String jdbcUrl;
-    private final String derivedKey;
+    private final DbConnectionHelper connHelper;
 
     public SessionQuery(String jdbcUrl, String derivedKey) {
-        this.jdbcUrl = jdbcUrl;
-        this.derivedKey = derivedKey;
+        this.connHelper = new DbConnectionHelper(jdbcUrl);
     }
 
     /**
@@ -60,20 +58,35 @@ public class SessionQuery {
                 new Object[]{"%" + keyword + "%"});
     }
 
-    private Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(jdbcUrl);
+    private Connection getConnection() throws SQLException {
+        return connHelper.getConnection();
+    }
+
+    public void close() {
+        connHelper.close();
     }
 
     private List<Session> query(String sql, Object[] params) {
         List<Session> sessions = new ArrayList<>();
-        try (Connection conn = openConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < params.length; i++) {
-                ps.setObject(i + 1, params[i]);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    sessions.add(mapSession(rs));
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    Object p = params[i];
+                    if (p instanceof Long) {
+                        ps.setLong(i + 1, (Long) p);
+                    } else if (p instanceof Integer) {
+                        ps.setInt(i + 1, (Integer) p);
+                    } else if (p instanceof String) {
+                        ps.setString(i + 1, (String) p);
+                    } else {
+                        ps.setObject(i + 1, p);
+                    }
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        sessions.add(mapSession(rs));
+                    }
                 }
             }
         } catch (SQLException e) {

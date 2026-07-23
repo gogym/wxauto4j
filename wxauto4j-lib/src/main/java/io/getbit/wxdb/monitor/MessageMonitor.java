@@ -29,6 +29,7 @@ public class MessageMonitor {
     private final ScheduledExecutorService scheduler;
     private final Map<String, Long> lastLocalIds = new ConcurrentHashMap<>();
     private final Set<String> monitoredUsernames = ConcurrentHashMap.newKeySet();
+    private final Map<String, Contact> contactCache = new ConcurrentHashMap<>();
     private Consumer<MonitoredMessage> onNewMessage;
     private ScheduledFuture<?> pollTask;
 
@@ -59,7 +60,9 @@ public class MessageMonitor {
         }
         monitoredUsernames.add(username);
         // 记录当前最大 local_id，只监听之后的新消息
+        System.out.println("[监听] 正在获取 " + username + " 的 maxLocalId...");
         long maxId = db.getMaxLocalId(username);
+        System.out.println("[监听] " + username + " maxLocalId=" + maxId);
         lastLocalIds.put(username, maxId);
         LOG.info("开始监听: " + username + " (当前最大 local_id=" + maxId + ")");
 
@@ -130,7 +133,7 @@ public class MessageMonitor {
      */
     public List<Contact> searchContacts(String keyword) {
         if (keyword == null || keyword.trim().isEmpty()) {
-            return db.getContacts().subList(0, Math.min(50, db.getContactCount()));
+            return db.getRecentContacts(50);
         }
         return db.searchContacts(keyword.trim());
     }
@@ -139,33 +142,55 @@ public class MessageMonitor {
 
     private void ensurePolling() {
         if (pollTask != null && !pollTask.isDone()) {
+            System.out.println("[监听] 轮询任务已在运行");
             return;
         }
-        pollTask = scheduler.scheduleWithFixedDelay(this::pollNewMessages, 2, 5, TimeUnit.SECONDS);
+        System.out.println("[监听] 创建轮询任务，间隔1秒");
+        pollTask = scheduler.scheduleWithFixedDelay(this::pollNewMessages, 0, 500, TimeUnit.MILLISECONDS);
     }
 
     private void pollNewMessages() {
+        System.out.println("[轮询心跳] 监听列表=" + monitoredUsernames + ", lastLocalIds=" + lastLocalIds);
         for (String username : monitoredUsernames) {
             try {
                 Long lastId = lastLocalIds.get(username);
-                if (lastId == null) continue;
+                if (lastId == null) {
+                    System.out.println("[轮询] " + username + " lastId为null，跳过");
+                    continue;
+                }
 
+                System.out.println("[轮询] " + username + " 准备查询 lastId=" + lastId + " ...");
+                long t0 = System.currentTimeMillis();
                 List<ChatMessage> newMsgs = db.getMessagesNewerThan(username, lastId);
+                long elapsed = System.currentTimeMillis() - t0;
+                System.out.println("[轮询] " + username + " 查询完成，查到 " + newMsgs.size() + " 条 (耗时" + elapsed + "ms)");
+
                 if (!newMsgs.isEmpty()) {
-                    for (ChatMessage m : newMsgs) {
-                        MonitoredMessage mm = toMonitoredMessage(m, username);
-                        if (onNewMessage != null) {
-                            onNewMessage.accept(mm);
-                        }
-                    }
-                    // 更新 lastLocalId
+                    // 先更新 lastLocalId，防止处理异常时下次重复查询
                     long maxId = newMsgs.get(newMsgs.size() - 1).getLocalId();
                     lastLocalIds.put(username, maxId);
+
+                    for (ChatMessage m : newMsgs) {
+                        try {
+                            System.out.println("[轮询] 处理消息 localId=" + m.getLocalId() + " type=" + m.getLocalType());
+                            MonitoredMessage mm = toMonitoredMessage(m, username);
+                            System.out.println("[轮询] 消息解析完成: " + mm.toDisplayString());
+                            if (onNewMessage != null) {
+                                onNewMessage.accept(mm);
+                                System.out.println("[轮询] 回调完成");
+                            }
+                        } catch (Exception ex) {
+                            System.err.println("[轮询] 处理单条消息异常 localId=" + m.getLocalId() + ": " + ex.getMessage());
+                            ex.printStackTrace();
+                        }
+                    }
                 }
             } catch (Exception e) {
-                LOG.log(Level.WARNING, "轮询消息异常: " + username, e);
+                System.err.println("[轮询] 消息异常 " + username + ": " + e.getMessage());
+                e.printStackTrace();
             }
         }
+        System.out.println("[轮询心跳] 本轮结束");
     }
 
     private MonitoredMessage toMonitoredMessage(ChatMessage m, String chatUsername) {
@@ -202,25 +227,35 @@ public class MessageMonitor {
         mm.setSenderUsername(senderUsername);
         mm.setContent(content);
 
-        // 解析联系人信息用于显示
-        try {
-            Contact contact = db.getContact(chatUsername);
-            if (contact != null) {
-                mm.setChatDisplayName(contact.getDisplayName());
-            }
-        } catch (Exception ignored) {}
+        // 解析联系人显示名（使用缓存）
+        Contact contact = getContactCached(chatUsername);
+        if (contact != null) {
+            mm.setChatDisplayName(contact.getDisplayName());
+        }
 
-        // 解析发送者显示名
+        // 解析发送者显示名（使用缓存）
         if (senderUsername != null) {
-            try {
-                Contact senderContact = db.getContact(senderUsername);
-                if (senderContact != null) {
-                    mm.setSenderDisplayName(senderContact.getDisplayName());
-                }
-            } catch (Exception ignored) {}
+            Contact senderContact = getContactCached(senderUsername);
+            if (senderContact != null) {
+                mm.setSenderDisplayName(senderContact.getDisplayName());
+            }
         }
 
         return mm;
+    }
+
+    /**
+     * 带缓存的联系人查询，避免每条消息都查数据库
+     */
+    private Contact getContactCached(String username) {
+        return contactCache.computeIfAbsent(username, u -> {
+            try {
+                return db.getContact(u);
+            } catch (Exception e) {
+                LOG.log(Level.FINE, "查询联系人失败: " + u, e);
+                return null;
+            }
+        });
     }
 
     /**

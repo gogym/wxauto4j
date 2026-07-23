@@ -21,47 +21,67 @@ import java.util.regex.Pattern;
 public class FridaKeyExtractor {
 
     private static final String FRIDA_PATH = findFridaStatic();
-    private static final Pattern RAW_KEY_PATTERN = Pattern.compile("RAW_KEY=([0-9a-f]{64})");
+    private static final Pattern RAW_KEY_PATTERN = Pattern.compile("([0-9a-f]{64})");
 
     /**
-     * Hook JS 脚本 - 拦截 CCKeyDerivationPBKDF 提取 raw key
+     * 根据密钥输出文件路径生成 Hook JS 脚本。
+     * <p>
+     * 密钥直接写入文件，不依赖 frida 的 stdout（frida 在非 TTY 环境下不会输出到 stdout）。
      */
-    private static final String HOOK_SCRIPT = """
-            const captured = new Set();
-            const pbkdf = Module.findGlobalExportByName("CCKeyDerivationPBKDF");
-            if (pbkdf) {
-                send("FOUND_PBKDF");
-                Interceptor.attach(pbkdf, {
-                    onEnter(args) {
-                        const passwordLen = args[2].toInt32();
-                        const derivedKeyLen = args[8] ? args[8].toInt32() : 0;
-                        if (derivedKeyLen === 32 && passwordLen === 32) {
-                            try {
-                                const rawKeyBytes = args[1].readByteArray(passwordLen);
-                                const rawKeyHex = Array.from(new Uint8Array(rawKeyBytes))
-                                    .map(b => b.toString(16).padStart(2, '0')).join('');
-                                if (!captured.has(rawKeyHex)) {
-                                    captured.add(rawKeyHex);
-                                    send("RAW_KEY=" + rawKeyHex);
+    private static String buildHookScript(String keyFilePath) {
+        // 转义路径中的反斜杠，供 JS 字符串使用
+        String escapedPath = keyFilePath.replace("\\", "\\\\");
+        return """
+                const captured = new Set();
+                const keyFile = "%s";
+                const pbkdf = Module.findGlobalExportByName("CCKeyDerivationPBKDF");
+                if (pbkdf) {
+                    Interceptor.attach(pbkdf, {
+                        onEnter(args) {
+                            const passwordLen = args[2].toInt32();
+                            const derivedKeyLen = args[8] ? args[8].toInt32() : 0;
+                            if (derivedKeyLen === 32 && passwordLen === 32) {
+                                try {
+                                    const rawKeyBytes = args[1].readByteArray(passwordLen);
+                                    const rawKeyHex = Array.from(new Uint8Array(rawKeyBytes))
+                                        .map(b => b.toString(16).padStart(2, '0')).join('');
+                                    if (!captured.has(rawKeyHex)) {
+                                        captured.add(rawKeyHex);
+                                        try {
+                                            const f = new File(keyFile, 'w');
+                                            f.write(rawKeyHex);
+                                            f.flush();
+                                            f.close();
+                                        } catch(e) {
+                                            console.log('Failed to write key file: ' + e);
+                                        }
+                                    }
+                                } catch(e) {
+                                    console.log('Hook error: ' + e);
                                 }
-                            } catch(e) {
-                                send("ERROR:" + e);
                             }
                         }
-                    }
-                });
-                send("HOOKS_INSTALLED");
-            } else {
-                send("ERROR:CCKeyDerivationPBKDF not found");
-            }
-            """;
+                    });
+                } else {
+                    console.log('ERROR: CCKeyDerivationPBKDF not found');
+                }
+                """.formatted(escapedPath);
+    }
 
     private String fridaPath;
     private int timeoutSeconds;
+    private String lastError = null;
 
     public FridaKeyExtractor() {
         this.fridaPath = FRIDA_PATH;
         this.timeoutSeconds = 120; // spawn 模式需要较长时间（用户需扫码登录）
+    }
+
+    /**
+     * 获取最后一次提取失败的错误信息
+     */
+    public String getLastError() {
+        return lastError;
     }
 
     /**
@@ -80,9 +100,11 @@ public class FridaKeyExtractor {
      * @return raw key 的 hex 字符串（64字符），如果提取失败返回 null
      */
     public String extractKey() {
+        lastError = null;
         String wechatBin = findWeChatBinary();
         if (wechatBin == null) {
-            System.err.println("[FridaKeyExtractor] 找不到微信可执行文件");
+            lastError = "找不到微信可执行文件";
+            System.err.println("[FridaKeyExtractor] " + lastError);
             return null;
         }
         return spawnAndExtract(wechatBin);
@@ -119,56 +141,88 @@ public class FridaKeyExtractor {
     // ==================== 核心提取逻辑 ====================
 
     /**
-     * Spawn 模式：frida 启动微信，在 PBKDF 调用前 hook
+     * Spawn 模式：frida 启动微信，在 PBKDF 调用前 hook。
+     * <p>
+     * macOS Gatekeeper 首次启动无签名副本时只做验证不会真正打开，
+     * 因此加入重试逻辑：第一次等待60秒，如果没捕获到密钥就自动重试第二次。
      */
     private String spawnAndExtract(String binary) {
-        try {
-            // 先清理之前残留的微信副本和 frida 进程
-            cleanupFridaProcesses();
+        int maxAttempts = 2;
+        int firstAttemptSeconds = 30; // 首次尝试超时（Gatekeeper 验证通常很快）
+        int secondAttemptSeconds = 180; // 第二次尝试超时（3分钟，足够扫码登录）
 
-            Path scriptFile = Files.createTempFile("wx_hook_", ".js");
-            Files.writeString(scriptFile, HOOK_SCRIPT);
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            System.out.println("[FridaKeyExtractor] 第 " + attempt + " 次尝试 spawn 微信...");
+            if (attempt == 2) {
+                System.out.println("[FridaKeyExtractor] 首次尝试未捕获密钥，正在重试（Gatekeeper 验证可能已完成）...");
+            }
 
-            ProcessBuilder pb = new ProcessBuilder(
-                    fridaPath,
-                    "-q",                     // quiet mode
-                    "-f", binary,             // spawn 模式
-                    "-l", scriptFile.toString(),
-                    "-t", String.valueOf(timeoutSeconds)  // 保持 frida 运行，使 spawn 的进程存活
-            );
-            pb.redirectErrorStream(false);
+            try {
+                // 清理之前残留的微信副本和 frida 进程
+                cleanupFridaProcesses();
 
-            System.out.println("[FridaKeyExtractor] 正在通过 Frida 启动微信并 hook PBKDF...");
-            System.out.println("[FridaKeyExtractor] 请在微信中扫码登录，等待数据库打开...");
+                // 创建密钥输出文件
+                Path keyFile = Files.createTempFile("wx_key_", ".txt");
+                Files.delete(keyFile); // 删除文件，让 JS 创建（作为信号）
 
-            Process process = pb.start();
-            String key = readKeyFromOutput(process);
+                // 生成带文件路径的 hook 脚本
+                String hookScript = buildHookScript(keyFile.toString());
+                Path scriptFile = Files.createTempFile("wx_hook_", ".js");
+                Files.writeString(scriptFile, hookScript);
 
-            // 先强制终止 frida 进程
-            process.destroyForcibly();
-            process.waitFor(3, TimeUnit.SECONDS);
+                ProcessBuilder pb = new ProcessBuilder(
+                        fridaPath,
+                        "-q",
+                        "-f", binary,
+                        "-l", scriptFile.toString(),
+                        "-t", String.valueOf(timeoutSeconds)
+                );
+                pb.redirectErrorStream(false);
 
-            // 清理：杀掉微信副本和 frida-helper 残留进程
-            cleanupFridaProcesses();
+                Process process = pb.start();
 
-            Files.deleteIfExists(scriptFile);
+                // 第一次用较短超时，第二次用完整超时
+                int waitSeconds = (attempt == 1) ? firstAttemptSeconds : secondAttemptSeconds;
+                String key = readKeyFromFile(keyFile, waitSeconds);
 
-            return key;
-        } catch (Exception e) {
-            System.err.println("[FridaKeyExtractor] Spawn 提取失败: " + e.getMessage());
-            // 失败时也清理
-            cleanupFridaProcesses();
-            return null;
+                // 终止 frida 进程
+                process.destroyForcibly();
+                process.waitFor(3, TimeUnit.SECONDS);
+
+                // 清理
+                cleanupFridaProcesses();
+                Files.deleteIfExists(scriptFile);
+                Files.deleteIfExists(keyFile);
+
+                if (key != null) {
+                    return key;
+                }
+
+                // 第一次失败，继续重试
+                System.out.println("[FridaKeyExtractor] 第 " + attempt + " 次尝试未捕获密钥");
+            } catch (Exception e) {
+                System.err.println("[FridaKeyExtractor] 第 " + attempt + " 次尝试失败: " + e.getMessage());
+                cleanupFridaProcesses();
+            }
         }
+
+        lastError = "已尝试 " + maxAttempts + " 次，均未捕获到密钥";
+        System.err.println("[FridaKeyExtractor] " + lastError);
+        return null;
     }
 
     /**
      * Attach 模式：附加到已运行的微信
      */
     private String attachAndExtract(int pid) {
+        Path keyFile = null;
         try {
+            keyFile = Files.createTempFile("wx_key_", ".txt");
+            Files.delete(keyFile);
+
+            String hookScript = buildHookScript(keyFile.toString());
             Path scriptFile = Files.createTempFile("wx_hook_", ".js");
-            Files.writeString(scriptFile, HOOK_SCRIPT);
+            Files.writeString(scriptFile, hookScript);
 
             ProcessBuilder pb = new ProcessBuilder(
                     fridaPath,
@@ -180,74 +234,48 @@ public class FridaKeyExtractor {
             pb.redirectErrorStream(false);
 
             Process process = pb.start();
-            String key = readKeyFromOutput(process);
+            String key = readKeyFromFile(keyFile, timeoutSeconds);
 
             process.destroyForcibly();
             Files.deleteIfExists(scriptFile);
+            Files.deleteIfExists(keyFile);
 
             return key;
         } catch (Exception e) {
             System.err.println("[FridaKeyExtractor] Attach 提取失败: " + e.getMessage());
+            lastError = e.getMessage();
+            if (keyFile != null) {
+                try { Files.deleteIfExists(keyFile); } catch (Exception ignored) {}
+            }
             return null;
         }
     }
 
     /**
-     * 从 frida 进程输出中解析 raw key
+     * 轮询密钥文件，等待 JS hook 将密钥写入。
+     *
+     * @param keyFile 密钥文件路径
+     * @param waitSeconds 等待超时（秒）
      */
-    private String readKeyFromOutput(Process process) throws IOException, InterruptedException {
-        // 在单独线程中消费 stderr，防止阻塞
-        Thread stderrThread = new Thread(() -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.contains("Error") || line.contains("error")) {
-                        System.err.println("[Frida STDERR] " + line);
-                    }
-                }
-            } catch (IOException ignored) {}
-        });
-        stderrThread.setDaemon(true);
-        stderrThread.start();
+    private String readKeyFromFile(Path keyFile, int waitSeconds) throws IOException, InterruptedException {
+        long startTime = System.currentTimeMillis();
+        long timeoutMs = waitSeconds * 1000L;
 
-        String rawKey = null;
-        boolean hookInstalled = false;
-
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            long startTime = System.currentTimeMillis();
-            long timeoutMs = timeoutSeconds * 1000L;
-
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (System.currentTimeMillis() - startTime > timeoutMs) {
-                    System.err.println("[FridaKeyExtractor] 超时 (" + timeoutSeconds + "s)");
-                    break;
-                }
-
-                // 在输出中查找 RAW_KEY=xxx（frida CLI 可能包裹在 JSON 或 REPL 格式中）
-                Matcher matcher = RAW_KEY_PATTERN.matcher(line);
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            if (Files.exists(keyFile)) {
+                String content = Files.readString(keyFile).trim();
+                Matcher matcher = RAW_KEY_PATTERN.matcher(content);
                 if (matcher.find()) {
-                    rawKey = matcher.group(1);
+                    String rawKey = matcher.group(1);
                     System.out.println("[FridaKeyExtractor] 密钥已提取: " + rawKey.substring(0, 8) + "...");
-                    break;
-                }
-
-                if (line.contains("HOOKS_INSTALLED")) {
-                    hookInstalled = true;
-                    System.out.println("[FridaKeyExtractor] Hook 已安装，等待 PBKDF 调用...");
-                }
-
-                if (line.contains("ERROR:")) {
-                    System.err.println("[FridaKeyExtractor] 脚本错误: " + line);
+                    return rawKey;
                 }
             }
+            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
         }
 
-        if (rawKey == null) {
-            System.err.println("[FridaKeyExtractor] 未捕获到密钥。Hook 已安装: " + hookInstalled);
-        }
-
-        return rawKey;
+        System.err.println("[FridaKeyExtractor] 等待 " + waitSeconds + "s 未捕获到密钥");
+        return null;
     }
 
     // ==================== 工具方法 ====================

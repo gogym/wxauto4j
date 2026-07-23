@@ -7,7 +7,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 
 /**
  * 消息查询
@@ -19,12 +23,20 @@ import java.util.List;
  */
 public class MessageQuery {
 
+    private static final Logger LOG = Logger.getLogger(MessageQuery.class.getName());
+
     private final List<String> jdbcUrls;
     private final List<String> derivedKeys;
+    private final Map<String, DbConnectionHelper> connHelpers = new HashMap<>();
+    private final Map<String, TableRef> tableCache = new ConcurrentHashMap<>();
 
     public MessageQuery(List<String> jdbcUrls, List<String> derivedKeys) {
         this.jdbcUrls = jdbcUrls;
         this.derivedKeys = derivedKeys;
+        // 为每个 DB 创建连接管理器
+        for (int i = 0; i < jdbcUrls.size(); i++) {
+            connHelpers.put(jdbcUrls.get(i), new DbConnectionHelper(jdbcUrls.get(i)));
+        }
     }
 
     /**
@@ -36,7 +48,7 @@ public class MessageQuery {
 
         String sql = "SELECT * FROM " + ref.tableName +
                 " ORDER BY create_time DESC LIMIT ?";
-        return queryMessages(ref.jdbcUrl, ref.derivedKey, sql, new Object[]{limit});
+        return queryMessages(ref, sql, new Object[]{limit});
     }
 
     /**
@@ -51,7 +63,7 @@ public class MessageQuery {
 
         String sql = "SELECT * FROM " + ref.tableName +
                 " WHERE create_time >= ? AND create_time <= ? ORDER BY create_time ASC";
-        return queryMessages(ref.jdbcUrl, ref.derivedKey, sql, new Object[]{startTime, endTime});
+        return queryMessages(ref, sql, new Object[]{startTime, endTime});
     }
 
     /**
@@ -62,7 +74,7 @@ public class MessageQuery {
         if (ref == null) return List.of();
 
         String sql = "SELECT * FROM " + ref.tableName + " ORDER BY create_time ASC";
-        return queryMessages(ref.jdbcUrl, ref.derivedKey, sql, new Object[]{});
+        return queryMessages(ref, sql, new Object[]{});
     }
 
     /**
@@ -74,7 +86,7 @@ public class MessageQuery {
 
         String sql = "SELECT * FROM " + ref.tableName +
                 " WHERE message_content LIKE ? ORDER BY create_time DESC";
-        return queryMessages(ref.jdbcUrl, ref.derivedKey, sql, new Object[]{"%" + keyword + "%"});
+        return queryMessages(ref, sql, new Object[]{"%" + keyword + "%"});
     }
 
     /**
@@ -83,11 +95,11 @@ public class MessageQuery {
     public List<ChatMessage> searchAllMessages(String keyword) {
         List<ChatMessage> results = new ArrayList<>();
         for (int i = 0; i < jdbcUrls.size(); i++) {
-            List<String> tables = listMsgTables(jdbcUrls.get(i), derivedKeys.get(i));
+            List<String> tables = listMsgTables(jdbcUrls.get(i));
             for (String table : tables) {
                 String sql = "SELECT * FROM " + table +
                         " WHERE message_content LIKE ? ORDER BY create_time DESC LIMIT 50";
-                results.addAll(queryMessages(jdbcUrls.get(i), derivedKeys.get(i), sql, new Object[]{"%" + keyword + "%"}));
+                results.addAll(queryMessages(getHelper(jdbcUrls.get(i)), sql, new Object[]{"%" + keyword + "%"}));
             }
         }
         results.sort((a, b) -> Long.compare(b.getCreateTime(), a.getCreateTime()));
@@ -106,7 +118,41 @@ public class MessageQuery {
 
         String sql = "SELECT * FROM " + ref.tableName +
                 " WHERE local_id > ? ORDER BY local_id ASC";
-        return queryMessages(ref.jdbcUrl, ref.derivedKey, sql, new Object[]{afterLocalId});
+
+        List<ChatMessage> messages = new ArrayList<>();
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection(ref.jdbcUrl);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setLong(1, afterLocalId);
+                ps.setQueryTimeout(5);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        messages.add(mapMessage(rs));
+                    }
+                }
+            }
+            // 诊断：查到0条时，额外查一下当前MAX(local_id)，判断微信是否已写入
+            if (messages.isEmpty()) {
+                try (Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery(
+                             "SELECT MAX(local_id) FROM " + ref.tableName)) {
+                    if (rs.next()) {
+                        long currentMax = rs.getLong(1);
+                        if (currentMax > afterLocalId) {
+                            System.out.println("[诊断] 微信已写入新数据! currentMax=" + currentMax + " afterLocalId=" + afterLocalId + " 但查询返回0条");
+                        }
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            System.err.println("[轮询] DB查询异常: " + e.getMessage());
+        } finally {
+            if (conn != null) {
+                try { conn.close(); } catch (SQLException ignored) {}
+            }
+        }
+        return messages;
     }
 
     /**
@@ -116,11 +162,13 @@ public class MessageQuery {
         TableRef ref = findTable(username);
         if (ref == null) return 0;
 
-        try (Connection conn = openConnection(ref.jdbcUrl, ref.derivedKey);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(
-                     "SELECT MAX(local_id) FROM " + ref.tableName)) {
-            return rs.next() ? rs.getLong(1) : 0;
+        try {
+            Connection conn = getHelper(ref.jdbcUrl).getConnection();
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(
+                         "SELECT MAX(local_id) FROM " + ref.tableName)) {
+                return rs.next() ? rs.getLong(1) : 0;
+            }
         } catch (SQLException e) {
             return 0;
         }
@@ -131,13 +179,15 @@ public class MessageQuery {
      */
     public String resolveSenderUsername(int senderRowId) {
         for (int i = 0; i < jdbcUrls.size(); i++) {
-            try (Connection conn = openConnection(jdbcUrls.get(i), derivedKeys.get(i));
-                 PreparedStatement ps = conn.prepareStatement(
-                         "SELECT user_name FROM Name2Id WHERE rowid = ?")) {
-                ps.setLong(1, senderRowId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        return rs.getString(1);
+            try {
+                Connection conn = getHelper(jdbcUrls.get(i)).getConnection();
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT user_name FROM Name2Id WHERE rowid = ?")) {
+                    ps.setLong(1, senderRowId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            return rs.getString(1);
+                        }
                     }
                 }
             } catch (SQLException e) {
@@ -154,10 +204,12 @@ public class MessageQuery {
         TableRef ref = findTable(username);
         if (ref == null) return 0;
 
-        try (Connection conn = openConnection(ref.jdbcUrl, ref.derivedKey);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT count(*) FROM " + ref.tableName)) {
-            return rs.next() ? rs.getInt(1) : 0;
+        try {
+            Connection conn = getHelper(ref.jdbcUrl).getConnection();
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT count(*) FROM " + ref.tableName)) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
         } catch (SQLException e) {
             return 0;
         }
@@ -165,35 +217,48 @@ public class MessageQuery {
 
     // ========== 内部方法 ==========
 
-    private Connection openConnection(String jdbcUrl, String derivedKey) throws SQLException {
-        return DriverManager.getConnection(jdbcUrl);
+    private DbConnectionHelper getHelper(String jdbcUrl) {
+        return connHelpers.get(jdbcUrl);
+    }
+
+    public void close() {
+        for (DbConnectionHelper helper : connHelpers.values()) {
+            helper.close();
+        }
+        connHelpers.clear();
+        tableCache.clear();
     }
 
     /**
-     * 查找 username 对应的消息表
+     * 查找 username 对应的消息表（带缓存）
      * <p>
-     * 表名 = Msg_ + MD5(username)，需要在所有 message DB 中查找
+     * 表名 = Msg_ + MD5(username)，需要在所有 message DB 中查找。
+     * 结果缓存到 tableCache，避免每次都查 sqlite_master。
      */
     private TableRef findTable(String username) {
-        String tableName = "Msg_" + md5(username);
-        for (int i = 0; i < jdbcUrls.size(); i++) {
-            if (tableExists(jdbcUrls.get(i), derivedKeys.get(i), tableName)) {
-                return new TableRef(jdbcUrls.get(i), derivedKeys.get(i), tableName);
+        return tableCache.computeIfAbsent(username, u -> {
+            String tableName = "Msg_" + md5(u);
+            for (int i = 0; i < jdbcUrls.size(); i++) {
+                if (tableExists(jdbcUrls.get(i), tableName)) {
+                    return new TableRef(jdbcUrls.get(i), tableName);
+                }
             }
-        }
-        return null;
+            return null;
+        });
     }
 
     /**
      * 检查数据库中是否存在指定表
      */
-    private boolean tableExists(String jdbcUrl, String derivedKey, String tableName) {
-        try (Connection conn = openConnection(jdbcUrl, derivedKey);
-             PreparedStatement ps = conn.prepareStatement(
+    private boolean tableExists(String jdbcUrl, String tableName) {
+        try {
+            Connection conn = getHelper(jdbcUrl).getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(
                      "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?")) {
-            ps.setString(1, tableName);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getInt(1) > 0;
+                ps.setString(1, tableName);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() && rs.getInt(1) > 0;
+                }
             }
         } catch (SQLException e) {
             return false;
@@ -203,14 +268,16 @@ public class MessageQuery {
     /**
      * 列出数据库中所有 Msg_ 开头的表
      */
-    private List<String> listMsgTables(String jdbcUrl, String derivedKey) {
+    private List<String> listMsgTables(String jdbcUrl) {
         List<String> tables = new ArrayList<>();
-        try (Connection conn = openConnection(jdbcUrl, derivedKey);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(
+        try {
+            Connection conn = getHelper(jdbcUrl).getConnection();
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(
                      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")) {
-            while (rs.next()) {
-                tables.add(rs.getString("name"));
+                while (rs.next()) {
+                    tables.add(rs.getString("name"));
+                }
             }
         } catch (SQLException e) {
             // ignore
@@ -218,16 +285,31 @@ public class MessageQuery {
         return tables;
     }
 
-    private List<ChatMessage> queryMessages(String jdbcUrl, String derivedKey, String sql, Object[] params) {
+    private List<ChatMessage> queryMessages(TableRef ref, String sql, Object[] params) {
+        return queryMessages(getHelper(ref.jdbcUrl), sql, params);
+    }
+
+    private List<ChatMessage> queryMessages(DbConnectionHelper helper, String sql, Object[] params) {
         List<ChatMessage> messages = new ArrayList<>();
-        try (Connection conn = openConnection(jdbcUrl, derivedKey);
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < params.length; i++) {
-                ps.setObject(i + 1, params[i]);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    messages.add(mapMessage(rs));
+        try {
+            Connection conn = helper.getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    Object p = params[i];
+                    if (p instanceof Long) {
+                        ps.setLong(i + 1, (Long) p);
+                    } else if (p instanceof Integer) {
+                        ps.setInt(i + 1, (Integer) p);
+                    } else if (p instanceof String) {
+                        ps.setString(i + 1, (String) p);
+                    } else {
+                        ps.setObject(i + 1, p);
+                    }
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        messages.add(mapMessage(rs));
+                    }
                 }
             }
         } catch (SQLException e) {
@@ -242,10 +324,16 @@ public class MessageQuery {
         m.setServerId(rs.getLong("server_id"));
         m.setLocalType(rs.getInt("local_type"));
         m.setSortSeq(rs.getLong("sort_seq"));
+        m.setRealSenderId(rs.getLong("real_sender_id"));
         m.setSenderId(rs.getString("real_sender_id"));
         m.setCreateTime(rs.getLong("create_time"));
         m.setStatus(rs.getInt("status"));
+        m.setUploadStatus(rs.getInt("upload_status"));
+        m.setDownloadStatus(rs.getInt("download_status"));
+        m.setServerSeq(rs.getLong("server_seq"));
+        m.setOriginSource(rs.getInt("origin_source"));
         m.setMessageContent(rs.getString("message_content"));
+        m.setCompressContent(rs.getString("compress_content"));
         m.setSource(rs.getString("source"));
         return m;
     }
@@ -267,5 +355,5 @@ public class MessageQuery {
         }
     }
 
-    private record TableRef(String jdbcUrl, String derivedKey, String tableName) {}
+    private record TableRef(String jdbcUrl, String tableName) {}
 }

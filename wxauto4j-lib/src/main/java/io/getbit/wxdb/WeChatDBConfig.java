@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 微信数据库配置
@@ -22,6 +24,7 @@ public class WeChatDBConfig {
     private String wxId;
     private String sqlcipherPath;
     private String decryptedDbDir;
+    private final Map<String, String> derivedKeyCache = new ConcurrentHashMap<>();
 
     private WeChatDBConfig() {
     }
@@ -218,7 +221,7 @@ public class WeChatDBConfig {
      */
     public String getEncryptedDbJdbcUrl(String category, String dbName) {
         String encPath = getEncryptedDbPath(category, dbName);
-        String derivedKey = KeyDerivation.deriveKey(rawKey, encPath);
+        String derivedKey = getDerivedKey(category, dbName);
         return "jdbc:sqlite:" + encPath + "?cipher=sqlcipher&legacy=4&key=x'" + derivedKey + "'";
     }
 
@@ -232,8 +235,11 @@ public class WeChatDBConfig {
      * @return 派生密钥的 hex 字符串
      */
     public String getDerivedKey(String category, String dbName) {
-        String encPath = getEncryptedDbPath(category, dbName);
-        return KeyDerivation.deriveKey(rawKey, encPath);
+        String cacheKey = category + "/" + dbName;
+        return derivedKeyCache.computeIfAbsent(cacheKey, k -> {
+            String encPath = getEncryptedDbPath(category, dbName);
+            return KeyDerivation.deriveKey(rawKey, encPath);
+        });
     }
 
     private static byte[] hexToBytes(String hex) {

@@ -102,6 +102,11 @@ public class WeChatDB {
         return contactQuery.getAll();
     }
 
+    public List<Contact> getRecentContacts(int limit) {
+        ensureContactQuery();
+        return contactQuery.getRecent(limit);
+    }
+
     public Contact getContact(String username) {
         ensureContactQuery();
         return contactQuery.getByUsername(username);
@@ -219,5 +224,14 @@ public class WeChatDB {
 
     public WeChatDBConfig getConfig() {
         return config;
+    }
+
+    /**
+     * 关闭所有数据库连接
+     */
+    public void close() {
+        if (sessionQuery != null) sessionQuery.close();
+        if (contactQuery != null) contactQuery.close();
+        if (messageQuery != null) messageQuery.close();
     }
 }
