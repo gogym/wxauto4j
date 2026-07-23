@@ -28,6 +28,7 @@ public class MessageMonitor {
     private final WeChatDB db;
     private final ScheduledExecutorService scheduler;
     private final Map<String, Long> lastLocalIds = new ConcurrentHashMap<>();
+    private final Map<String, Long> monitorStartTimes = new ConcurrentHashMap<>();
     private final Set<String> monitoredUsernames = ConcurrentHashMap.newKeySet();
     private final Map<String, Contact> contactCache = new ConcurrentHashMap<>();
     private Consumer<MonitoredMessage> onNewMessage;
@@ -59,12 +60,12 @@ public class MessageMonitor {
             return;
         }
         monitoredUsernames.add(username);
-        // 记录当前最大 local_id，只监听之后的新消息
-        System.out.println("[监听] 正在获取 " + username + " 的 maxLocalId...");
-        long maxId = db.getMaxLocalId(username);
-        System.out.println("[监听] " + username + " maxLocalId=" + maxId);
-        lastLocalIds.put(username, maxId);
-        LOG.info("开始监听: " + username + " (当前最大 local_id=" + maxId + ")");
+        // 记录监听开始时间（Unix 秒），只查该时间之后的消息，避免加载历史消息
+        long startTime = System.currentTimeMillis() / 1000;
+        monitorStartTimes.put(username, startTime);
+        lastLocalIds.put(username, 0L);
+        System.out.println("[监听] " + username + " 开始监听，起始时间=" + startTime);
+        LOG.info("开始监听: " + username + " (起始时间=" + startTime + ")");
 
         // 确保轮询任务在运行
         ensurePolling();
@@ -76,6 +77,7 @@ public class MessageMonitor {
     public void stopMonitoring(String username) {
         monitoredUsernames.remove(username);
         lastLocalIds.remove(username);
+        monitorStartTimes.remove(username);
         LOG.info("停止监听: " + username);
 
         if (monitoredUsernames.isEmpty() && pollTask != null) {
@@ -90,6 +92,7 @@ public class MessageMonitor {
     public void stopAll() {
         monitoredUsernames.clear();
         lastLocalIds.clear();
+        monitorStartTimes.clear();
         if (pollTask != null) {
             pollTask.cancel(false);
             pollTask = null;
@@ -154,14 +157,15 @@ public class MessageMonitor {
         for (String username : monitoredUsernames) {
             try {
                 Long lastId = lastLocalIds.get(username);
-                if (lastId == null) {
-                    System.out.println("[轮询] " + username + " lastId为null，跳过");
+                Long startTime = monitorStartTimes.get(username);
+                if (lastId == null || startTime == null) {
+                    System.out.println("[轮询] " + username + " lastId或startTime为null，跳过");
                     continue;
                 }
 
-                System.out.println("[轮询] " + username + " 准备查询 lastId=" + lastId + " ...");
+                System.out.println("[轮询] " + username + " 准备查询 startTime=" + startTime + " lastId=" + lastId + " ...");
                 long t0 = System.currentTimeMillis();
-                List<ChatMessage> newMsgs = db.getMessagesNewerThan(username, lastId);
+                List<ChatMessage> newMsgs = db.getMessagesSince(username, startTime, lastId);
                 long elapsed = System.currentTimeMillis() - t0;
                 System.out.println("[轮询] " + username + " 查询完成，查到 " + newMsgs.size() + " 条 (耗时" + elapsed + "ms)");
 

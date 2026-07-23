@@ -169,6 +169,11 @@ public class WeChatDB {
         return messageQuery.getMessagesNewerThan(username, afterLocalId);
     }
 
+    public List<ChatMessage> getMessagesSince(String username, long sinceTime, long afterLocalId) {
+        ensureMessageQuery();
+        return messageQuery.getMessagesSince(username, sinceTime, afterLocalId);
+    }
+
     public long getMaxLocalId(String username) {
         ensureMessageQuery();
         return messageQuery.getMaxLocalId(username);

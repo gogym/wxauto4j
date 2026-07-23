@@ -113,11 +113,25 @@ public class MessageQuery {
      * @param afterLocalId 此 local_id 之后的消息
      */
     public List<ChatMessage> getMessagesNewerThan(String username, long afterLocalId) {
+        return getMessagesSince(username, 0, afterLocalId);
+    }
+
+    /**
+     * 查询指定用户在某个时间之后且 local_id 大于指定值的新消息
+     * <p>
+     * 双条件过滤：create_time >= sinceTime 确保只查到监听开始后的消息，
+     * local_id > afterLocalId 确保不重复处理已见过的消息。
+     *
+     * @param username     用户 username
+     * @param sinceTime    监听开始时间（unix timestamp，秒），只查此时间之后的消息
+     * @param afterLocalId 此 local_id 之后的消息（防重复）
+     */
+    public List<ChatMessage> getMessagesSince(String username, long sinceTime, long afterLocalId) {
         TableRef ref = findTable(username);
         if (ref == null) return List.of();
 
         String sql = "SELECT * FROM " + ref.tableName +
-                " WHERE local_id > ? ORDER BY local_id ASC";
+                " WHERE create_time >= ? AND local_id > ? ORDER BY local_id ASC";
 
         // 从轮询连接池获取预创建的连接，避免每次轮询都创建新连接。
         // 独立连接确保能看到微信进程写入的新数据（共享连接因 WAL -shm mmap 限制不行）。
@@ -127,7 +141,8 @@ public class MessageQuery {
         try {
             conn = helper.acquirePollConnection();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setLong(1, afterLocalId);
+                ps.setLong(1, sinceTime);
+                ps.setLong(2, afterLocalId);
                 ps.setQueryTimeout(5);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {

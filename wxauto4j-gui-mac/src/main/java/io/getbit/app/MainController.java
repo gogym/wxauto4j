@@ -90,6 +90,9 @@ public class MainController implements Initializable {
     /** 密钥状态标签 */
     private Label lblDbKeyStatus;
 
+    /** 开始监听时自动选中联系人，跳过历史消息加载 */
+    private volatile boolean skipHistoryLoad = false;
+
     // ==================== 初始化 ====================
 
     @Override
@@ -633,7 +636,10 @@ public class MainController implements Initializable {
                     messageMonitor.startMonitoring(username);
                     refreshMonitoredList();
                     appendLog("✅ 开始监听: " + selected);
+                    // 清空消息区，仅显示新消息
+                    txtMonitorMessages.clear();
                     // 自动选中刚添加的联系人，确保回调能正常工作
+                    skipHistoryLoad = true;
                     for (int i = 0; i < lstMonitoredContacts.getItems().size(); i++) {
                         if (lstMonitoredContacts.getItems().get(i).contains(username)) {
                             lstMonitoredContacts.getSelectionModel().select(i);
@@ -675,14 +681,15 @@ public class MainController implements Initializable {
             }
         });
 
-        // 点击监听列表时加载历史消息
+        // 点击监听列表时加载历史消息（开始监听时的自动选中除外）
         lstMonitoredContacts.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
-            if (newVal != null && weChatDB != null) {
+            if (newVal != null && weChatDB != null && !skipHistoryLoad) {
                 String username = extractUsername(newVal);
                 if (username != null) {
                     loadHistoryMessages(username);
                 }
             }
+            skipHistoryLoad = false;
         });
 
         panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
