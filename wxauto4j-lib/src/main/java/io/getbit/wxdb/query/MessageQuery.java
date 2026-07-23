@@ -119,10 +119,13 @@ public class MessageQuery {
         String sql = "SELECT * FROM " + ref.tableName +
                 " WHERE local_id > ? ORDER BY local_id ASC";
 
+        // 从轮询连接池获取预创建的连接，避免每次轮询都创建新连接。
+        // 独立连接确保能看到微信进程写入的新数据（共享连接因 WAL -shm mmap 限制不行）。
         List<ChatMessage> messages = new ArrayList<>();
+        DbConnectionHelper helper = getHelper(ref.jdbcUrl);
         Connection conn = null;
         try {
-            conn = DriverManager.getConnection(ref.jdbcUrl);
+            conn = helper.acquirePollConnection();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setLong(1, afterLocalId);
                 ps.setQueryTimeout(5);
@@ -132,25 +135,10 @@ public class MessageQuery {
                     }
                 }
             }
-            // 诊断：查到0条时，额外查一下当前MAX(local_id)，判断微信是否已写入
-            if (messages.isEmpty()) {
-                try (Statement stmt = conn.createStatement();
-                     ResultSet rs = stmt.executeQuery(
-                             "SELECT MAX(local_id) FROM " + ref.tableName)) {
-                    if (rs.next()) {
-                        long currentMax = rs.getLong(1);
-                        if (currentMax > afterLocalId) {
-                            System.out.println("[诊断] 微信已写入新数据! currentMax=" + currentMax + " afterLocalId=" + afterLocalId + " 但查询返回0条");
-                        }
-                    }
-                }
-            }
         } catch (SQLException e) {
             System.err.println("[轮询] DB查询异常: " + e.getMessage());
         } finally {
-            if (conn != null) {
-                try { conn.close(); } catch (SQLException ignored) {}
-            }
+            helper.releasePollConnection(conn);
         }
         return messages;
     }

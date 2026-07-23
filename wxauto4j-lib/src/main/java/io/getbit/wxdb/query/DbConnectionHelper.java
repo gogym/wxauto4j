@@ -3,6 +3,7 @@ package io.getbit.wxdb.query;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -11,23 +12,30 @@ import java.util.logging.Logger;
  * <p>
  * 统一管理连接的创建、PRAGMA 优化配置、有效性检查和自动重连。
  * 所有 Query 类共享此管理器，避免重复的连接管理代码。
+ * <p>
+ * 提供轮询连接池：预创建多个连接，轮询时从池中获取，用完后关闭并异步补充。
+ * 解决 WAL 模式下共享连接无法看到其他进程新数据的问题。
  */
 public class DbConnectionHelper {
 
     private static final Logger LOG = Logger.getLogger(DbConnectionHelper.class.getName());
 
+    /** 轮询连接池大小 */
+    private static final int POOL_SIZE = 3;
+
     private final String jdbcUrl;
     private volatile Connection connection;
+
+    /** 轮询连接池：预创建连接，用完关闭并异步补充 */
+    private final LinkedBlockingDeque<Connection> pollPool = new LinkedBlockingDeque<>();
+    private volatile boolean poolInitialized = false;
 
     public DbConnectionHelper(String jdbcUrl) {
         this.jdbcUrl = jdbcUrl;
     }
 
     /**
-     * 获取连接（线程安全）
-     * <p>
-     * 如果连接不存在或已关闭，自动创建新连接并应用 PRAGMA 优化。
-     * 保持 auto-commit 开启，确保每次查询都能看到最新数据。
+     * 获取共享连接（用于非轮询场景）
      */
     public synchronized Connection getConnection() throws SQLException {
         if (connection != null && !connection.isClosed()) {
@@ -38,6 +46,60 @@ public class DbConnectionHelper {
         }
         connection = createOptimizedConnection();
         return connection;
+    }
+
+    /**
+     * 从轮询连接池获取一个连接。
+     * 池中的连接都是预先创建好的，获取操作是即时的。
+     * 如果池为空（极端情况），会同步创建一个新连接。
+     */
+    public Connection acquirePollConnection() throws SQLException {
+        ensurePoolInitialized();
+        Connection conn = pollPool.poll();
+        if (conn != null && !conn.isClosed()) {
+            return conn;
+        }
+        // 池空或连接已关闭，同步创建
+        return createOptimizedConnection();
+    }
+
+    /**
+     * 归还轮询连接：关闭旧连接，异步补充池中连接。
+     */
+    public void releasePollConnection(Connection conn) {
+        if (conn != null) {
+            try { conn.close(); } catch (SQLException ignored) {}
+        }
+        // 异步补充一个新连接到池中
+        if (pollPool.size() < POOL_SIZE) {
+            Thread filler = new Thread(() -> {
+                try {
+                    Connection newConn = createOptimizedConnection();
+                    pollPool.offer(newConn);
+                } catch (SQLException e) {
+                    LOG.log(Level.WARNING, "轮询连接池补充失败", e);
+                }
+            }, "pool-filler");
+            filler.setDaemon(true);
+            filler.start();
+        }
+    }
+
+    private void ensurePoolInitialized() {
+        if (!poolInitialized) {
+            synchronized (this) {
+                if (!poolInitialized) {
+                    for (int i = 0; i < POOL_SIZE; i++) {
+                        try {
+                            pollPool.offer(createOptimizedConnection());
+                        } catch (SQLException e) {
+                            LOG.log(Level.WARNING, "轮询连接池初始化失败", e);
+                        }
+                    }
+                    poolInitialized = true;
+                }
+            }
+        }
     }
 
     /**
@@ -55,9 +117,7 @@ public class DbConnectionHelper {
      */
     private void applyPragmas(Connection conn) {
         try {
-            // 设置忙等待超时 5 秒，避免 SQLITE_BUSY 错误
             conn.createStatement().execute("PRAGMA busy_timeout = 5000");
-            // 设置页缓存 2MB（负数单位为 KB），减少磁盘 IO
             conn.createStatement().execute("PRAGMA cache_size = -2000");
         } catch (SQLException e) {
             LOG.log(Level.WARNING, "Failed to apply PRAGMA optimizations", e);
@@ -65,25 +125,7 @@ public class DbConnectionHelper {
     }
 
     /**
-     * 重建连接：关闭旧连接，创建新连接。
-     * 用于多进程场景（微信进程写入，本进程读取），新连接会重新读取 WAL 索引，
-     * 从而看到其他进程写入的新数据。
-     */
-    public synchronized void reconnect() throws SQLException {
-        if (connection != null) {
-            try {
-                if (!connection.isClosed()) {
-                    connection.close();
-                }
-            } catch (SQLException ignored) {
-            }
-            connection = null;
-        }
-        connection = createOptimizedConnection();
-    }
-
-    /**
-     * 关闭连接
+     * 关闭所有连接（共享连接 + 轮询池）
      */
     public synchronized void close() {
         if (connection != null) {
@@ -95,5 +137,11 @@ public class DbConnectionHelper {
             }
             connection = null;
         }
+        // 关闭轮询池中的所有连接
+        Connection poolConn;
+        while ((poolConn = pollPool.poll()) != null) {
+            try { poolConn.close(); } catch (SQLException ignored) {}
+        }
+        poolInitialized = false;
     }
 }
