@@ -78,6 +78,15 @@ public class ContactQuery {
     }
 
     /**
+     * 按群名搜索群聊
+     */
+    public List<Contact> searchChatrooms(String keyword) {
+        return query(
+                "SELECT * FROM contact WHERE username LIKE '%@chatroom' AND (nick_name LIKE ? OR remark LIKE ?) ORDER BY nick_name",
+                new Object[]{"%" + keyword + "%", "%" + keyword + "%"});
+    }
+
+    /**
      * 查询所有公众号
      */
     public List<Contact> getOfficialAccounts() {

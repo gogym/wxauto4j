@@ -141,6 +141,16 @@ public class MessageMonitor {
         return db.searchContacts(keyword.trim());
     }
 
+    /**
+     * 搜索群聊
+     */
+    public List<Contact> searchChatrooms(String keyword) {
+        if (keyword == null || keyword.trim().isEmpty()) {
+            return db.getChatrooms();
+        }
+        return db.searchChatrooms(keyword.trim());
+    }
+
     // ========== 内部方法 ==========
 
     private void ensurePolling() {

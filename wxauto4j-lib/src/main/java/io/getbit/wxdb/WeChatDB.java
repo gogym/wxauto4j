@@ -122,6 +122,11 @@ public class WeChatDB {
         return contactQuery.getChatrooms();
     }
 
+    public List<Contact> searchChatrooms(String keyword) {
+        ensureContactQuery();
+        return contactQuery.searchChatrooms(keyword);
+    }
+
     public List<Contact> getOfficialAccounts() {
         ensureContactQuery();
         return contactQuery.getOfficialAccounts();

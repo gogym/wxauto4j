@@ -84,6 +84,12 @@ public class MainController implements Initializable {
     /** 监听面板的监听列表 */
     private ListView<String> lstMonitoredContacts;
 
+    /** 群聊监听面板的消息显示区 */
+    private TextArea txtGroupMessages;
+
+    /** 群聊监听面板的监听列表 */
+    private ListView<String> lstMonitoredGroups;
+
     /** 密钥输入框 */
     private TextField txtKey;
 
@@ -92,6 +98,25 @@ public class MainController implements Initializable {
 
     /** 开始监听时自动选中联系人，跳过历史消息加载 */
     private volatile boolean skipHistoryLoad = false;
+
+    /** 群聊监听时跳过历史消息加载 */
+    private volatile boolean skipGroupHistoryLoad = false;
+
+    /** 每个聊天的消息缓冲区，支持多聊天同时监听 */
+    private final Map<String, StringBuilder> chatBuffers = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 每个缓冲区最大保留行数，超出后截掉旧内容防止内存膨胀 */
+    private static final int MAX_BUFFER_LINES = 500;
+
+    /** TextArea 追加计数器，用于定期裁剪 */
+    private int privateMsgCount = 0;
+    private int groupMsgCount = 0;
+
+    /** 当前私聊面板选中的 username */
+    private volatile String selectedPrivateChat = null;
+
+    /** 当前群聊面板选中的 username */
+    private volatile String selectedGroupChat = null;
 
     // ==================== 初始化 ====================
 
@@ -123,9 +148,10 @@ public class MainController implements Initializable {
         // 一级菜单
         TreeItem<String> statusItem = new TreeItem<>("📊 状态面板");
         TreeItem<String> listenItem = new TreeItem<>("👂 私聊监听");
+        TreeItem<String> groupListenItem = new TreeItem<>("💬 群聊监听");
         TreeItem<String> groupItem = new TreeItem<>("👥 群组管理");
 
-        root.getChildren().addAll(statusItem, listenItem, groupItem);
+        root.getChildren().addAll(statusItem, listenItem, groupListenItem, groupItem);
 
         // 展开所有
         root.setExpanded(true);
@@ -153,6 +179,7 @@ public class MainController implements Initializable {
     private void initPanels() {
         panels.put("状态面板", createStatusPanel());
         panels.put("私聊监听", createListenPanel());
+        panels.put("群聊监听", createGroupListenPanel());
         panels.put("群组管理", createGroupPanel());
     }
 
@@ -418,17 +445,7 @@ public class MainController implements Initializable {
                         weChatDB = new WeChatDB(dbConfig);
                         weChatDB.init();
                         messageMonitor = new MessageMonitor(weChatDB);
-                        messageMonitor.setOnNewMessage(mm -> Platform.runLater(() -> {
-                            if (txtMonitorMessages != null) {
-                                txtMonitorMessages.appendText(mm.toDisplayString() + "\n");
-                                txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
-                            }
-                            appendLog("📩 [" + mm.getChatDisplayName() + "] " +
-                                    mm.getSenderDisplayName() + ": " +
-                                    (mm.getContent() != null && mm.getContent().length() > 50
-                                            ? mm.getContent().substring(0, 50) + "..."
-                                            : mm.getContent()));
-                        }));
+                        setupMessageCallback();
                         Platform.runLater(() -> appendLog("✅ [4/5] 数据库连接已就绪"));
                     } catch (Exception ex) {
                         Platform.runLater(() -> appendLog("⚠️ [4/5] 数据库初始化失败（可稍后手动初始化）: " + ex.getMessage()));
@@ -497,6 +514,7 @@ public class MainController implements Initializable {
                     weChatDB = new WeChatDB(dbConfig);
                     weChatDB.init();
                     messageMonitor = new MessageMonitor(weChatDB);
+                    setupMessageCallback();
 
                     Platform.runLater(() -> {
                         btnDecrypt.setDisable(false);
@@ -557,24 +575,28 @@ public class MainController implements Initializable {
         btnSearch.getStyleClass().add("btn-default");
         searchBox.getChildren().addAll(txtSearchContact, btnSearch);
 
-        // 搜索结果列表
+        // 搜索结果列表（支持多选）
         ListView<String> lstSearchResults = new ListView<>();
         lstSearchResults.setPrefHeight(120);
+        lstSearchResults.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
 
         // ===== 监听控制区域 =====
         HBox controlBox = new HBox(8);
         controlBox.setAlignment(Pos.CENTER_LEFT);
-        Button btnToggleMonitor = new Button("▶ 开始监听");
-        btnToggleMonitor.getStyleClass().add("btn-success");
+        Button btnAddMonitor = new Button("➕ 添加监听");
+        btnAddMonitor.getStyleClass().add("btn-success");
+        Button btnStopMonitor = new Button("⏹ 停止监听");
+        btnStopMonitor.getStyleClass().add("btn-danger");
         Button btnRefresh = new Button("📜 加载历史消息");
         btnRefresh.getStyleClass().add("btn-default");
-        controlBox.getChildren().addAll(btnToggleMonitor, btnRefresh);
+        controlBox.getChildren().addAll(btnAddMonitor, btnStopMonitor, btnRefresh);
 
         // 监听列表
-        Label lblMonitored = new Label("监听中的联系人:");
+        Label lblMonitored = new Label("监听中的联系人（可多选停止）:");
         lblMonitored.getStyleClass().add("sub-title");
         lstMonitoredContacts = new ListView<>();
         lstMonitoredContacts.setPrefHeight(120);
+        lstMonitoredContacts.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
         lstMonitoredContacts.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #f7f7f7;");
 
         // ===== 消息显示区域 =====
@@ -602,63 +624,54 @@ public class MainController implements Initializable {
             appendLog("搜索到 " + contacts.size() + " 个联系人");
         });
 
-        btnToggleMonitor.setOnAction(e -> {
+        btnAddMonitor.setOnAction(e -> {
             if (weChatDB == null || messageMonitor == null) {
                 appendLog("❗ 请先初始化数据库");
                 return;
             }
-            boolean isMonitoring = btnToggleMonitor.getText().contains("停止");
-            if (isMonitoring) {
-                // 当前是监听状态 → 停止监听
-                String selected = lstMonitoredContacts.getSelectionModel().getSelectedItem();
-                if (selected == null) {
-                    showError("未选择", "请先选择要停止监听的联系人");
-                    return;
-                }
-                String username = extractUsername(selected);
-                if (username != null) {
-                    messageMonitor.stopMonitoring(username);
-                    refreshMonitoredList();
-                    appendLog("⏹ 停止监听: " + selected);
-                }
-                btnToggleMonitor.setText("▶ 开始监听");
-                btnToggleMonitor.getStyleClass().removeAll("btn-danger");
-                btnToggleMonitor.getStyleClass().add("btn-success");
-            } else {
-                // 当前未监听 → 开始监听
-                String selected = lstSearchResults.getSelectionModel().getSelectedItem();
-                if (selected == null) {
-                    showError("未选择", "请先搜索并选择一个联系人");
-                    return;
-                }
+            var selectedItems = lstSearchResults.getSelectionModel().getSelectedItems();
+            if (selectedItems == null || selectedItems.isEmpty()) {
+                showError("未选择", "请先搜索并选择一个或多个联系人");
+                return;
+            }
+            // 复制一份避免迭代时修改
+            var toAdd = new java.util.ArrayList<>(selectedItems);
+            for (String selected : toAdd) {
                 String username = extractUsername(selected);
                 if (username != null) {
                     messageMonitor.startMonitoring(username);
-                    refreshMonitoredList();
+                    chatBuffers.putIfAbsent(username, new StringBuilder());
                     appendLog("✅ 开始监听: " + selected);
-                    // 清空消息区，仅显示新消息
-                    txtMonitorMessages.clear();
-                    // 自动选中刚添加的联系人，确保回调能正常工作
-                    skipHistoryLoad = true;
-                    for (int i = 0; i < lstMonitoredContacts.getItems().size(); i++) {
-                        if (lstMonitoredContacts.getItems().get(i).contains(username)) {
-                            lstMonitoredContacts.getSelectionModel().select(i);
-                            break;
-                        }
-                    }
-                    // 设置新消息回调，自动追加新消息
-                    messageMonitor.setOnNewMessage(mm -> {
-                        Platform.runLater(() -> {
-                            txtMonitorMessages.appendText(mm.toDisplayString() + "\n");
-                            txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
-                        });
-                    });
-                    appendLog("✅ 已开始监听新消息（不含历史）");
                 }
-                btnToggleMonitor.setText("⏹ 停止监听");
-                btnToggleMonitor.getStyleClass().removeAll("btn-success");
-                btnToggleMonitor.getStyleClass().add("btn-danger");
             }
+            refreshMonitoredList();
+            // 自动选中最后一个添加的联系人
+            if (!toAdd.isEmpty() && !lstMonitoredContacts.getItems().isEmpty()) {
+                skipHistoryLoad = true;
+                lstMonitoredContacts.getSelectionModel().select(lstMonitoredContacts.getItems().size() - 1);
+            }
+            appendLog("✅ 已添加 " + toAdd.size() + " 个联系人到监听列表");
+        });
+
+        btnStopMonitor.setOnAction(e -> {
+            if (weChatDB == null || messageMonitor == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            var selectedItems = lstMonitoredContacts.getSelectionModel().getSelectedItems();
+            if (selectedItems == null || selectedItems.isEmpty()) {
+                showError("未选择", "请先选择要停止监听的联系人");
+                return;
+            }
+            var toStop = new java.util.ArrayList<>(selectedItems);
+            for (String selected : toStop) {
+                String username = extractUsername(selected);
+                if (username != null) {
+                    messageMonitor.stopMonitoring(username);
+                    appendLog("⏹ 停止监听: " + selected);
+                }
+            }
+            refreshMonitoredList();
         });
 
         btnRefresh.setOnAction(e -> {
@@ -681,19 +694,180 @@ public class MainController implements Initializable {
             }
         });
 
-        // 点击监听列表时加载历史消息（开始监听时的自动选中除外）
+        // 点击监听列表时切换显示对应聊天的消息
         lstMonitoredContacts.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
-            if (newVal != null && weChatDB != null && !skipHistoryLoad) {
+            if (newVal != null) {
                 String username = extractUsername(newVal);
-                if (username != null) {
+                selectedPrivateChat = username;
+                if (!skipHistoryLoad && weChatDB != null && username != null) {
                     loadHistoryMessages(username);
                 }
+                // 显示该聊天的缓冲区
+                showChatBuffer(username, txtMonitorMessages);
+            } else {
+                selectedPrivateChat = null;
             }
             skipHistoryLoad = false;
         });
 
         panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
                 controlBox, lblMonitored, lstMonitoredContacts, lblMessages, txtMonitorMessages);
+        return panel;
+    }
+
+    /**
+     * 创建群聊监听监听面板
+     */
+    private Node createGroupListenPanel() {
+        VBox panel = new VBox(10);
+        panel.setPadding(new Insets(16));
+
+        Label title = new Label("群聊消息监听");
+        title.getStyleClass().add("section-title");
+
+        // ===== 搜索群聊区域 =====
+        Label lblSearch = new Label("搜索群聊:");
+        lblSearch.getStyleClass().add("sub-title");
+        HBox searchBox = new HBox(8);
+        searchBox.setAlignment(Pos.CENTER_LEFT);
+        TextField txtSearchGroup = createTextField("输入群名搜索", 250);
+        Button btnSearch = new Button("🔍 搜索");
+        btnSearch.getStyleClass().add("btn-default");
+        searchBox.getChildren().addAll(txtSearchGroup, btnSearch);
+
+        // 搜索结果列表（支持多选）
+        ListView<String> lstSearchResults = new ListView<>();
+        lstSearchResults.setPrefHeight(120);
+        lstSearchResults.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
+
+        // ===== 监听控制区域 =====
+        HBox controlBox = new HBox(8);
+        controlBox.setAlignment(Pos.CENTER_LEFT);
+        Button btnAddMonitor = new Button("➕ 添加监听");
+        btnAddMonitor.getStyleClass().add("btn-success");
+        Button btnStopMonitor = new Button("⏹ 停止监听");
+        btnStopMonitor.getStyleClass().add("btn-danger");
+        Button btnRefresh = new Button("📜 加载历史消息");
+        btnRefresh.getStyleClass().add("btn-default");
+        controlBox.getChildren().addAll(btnAddMonitor, btnStopMonitor, btnRefresh);
+
+        // 监听列表
+        Label lblMonitored = new Label("监听中的群聊（可多选停止）:");
+        lblMonitored.getStyleClass().add("sub-title");
+        lstMonitoredGroups = new ListView<>();
+        lstMonitoredGroups.setPrefHeight(120);
+        lstMonitoredGroups.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
+        lstMonitoredGroups.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #f7f7f7;");
+
+        // ===== 消息显示区域 =====
+        Label lblMessages = new Label("消息记录:");
+        lblMessages.getStyleClass().add("sub-title");
+        txtGroupMessages = new TextArea();
+        txtGroupMessages.setEditable(false);
+        txtGroupMessages.setWrapText(true);
+        txtGroupMessages.setPrefRowCount(15);
+        VBox.setVgrow(txtGroupMessages, javafx.scene.layout.Priority.ALWAYS);
+
+        // ===== 事件绑定 =====
+        btnSearch.setOnAction(e -> {
+            if (weChatDB == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            String keyword = txtSearchGroup.getText().trim();
+            List<Contact> groups = messageMonitor.searchChatrooms(keyword);
+            lstSearchResults.getItems().clear();
+            for (Contact c : groups) {
+                String display = c.getDisplayName() + " (" + c.getUsername() + ")";
+                lstSearchResults.getItems().add(display);
+            }
+            appendLog("搜索到 " + groups.size() + " 个群聊");
+        });
+
+        btnAddMonitor.setOnAction(e -> {
+            if (weChatDB == null || messageMonitor == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            var selectedItems = lstSearchResults.getSelectionModel().getSelectedItems();
+            if (selectedItems == null || selectedItems.isEmpty()) {
+                showError("未选择", "请先搜索并选择一个或多个群聊");
+                return;
+            }
+            var toAdd = new java.util.ArrayList<>(selectedItems);
+            for (String selected : toAdd) {
+                String username = extractUsername(selected);
+                if (username != null) {
+                    messageMonitor.startMonitoring(username);
+                    chatBuffers.putIfAbsent(username, new StringBuilder());
+                    appendLog("✅ 开始监听群聊: " + selected);
+                }
+            }
+            refreshMonitoredGroupList();
+            if (!toAdd.isEmpty() && !lstMonitoredGroups.getItems().isEmpty()) {
+                skipGroupHistoryLoad = true;
+                lstMonitoredGroups.getSelectionModel().select(lstMonitoredGroups.getItems().size() - 1);
+            }
+            appendLog("✅ 已添加 " + toAdd.size() + " 个群聊到监听列表");
+        });
+
+        btnStopMonitor.setOnAction(e -> {
+            if (weChatDB == null || messageMonitor == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            var selectedItems = lstMonitoredGroups.getSelectionModel().getSelectedItems();
+            if (selectedItems == null || selectedItems.isEmpty()) {
+                showError("未选择", "请先选择要停止监听的群聊");
+                return;
+            }
+            var toStop = new java.util.ArrayList<>(selectedItems);
+            for (String selected : toStop) {
+                String username = extractUsername(selected);
+                if (username != null) {
+                    messageMonitor.stopMonitoring(username);
+                    appendLog("⏹ 停止监听群聊: " + selected);
+                }
+            }
+            refreshMonitoredGroupList();
+        });
+
+        btnRefresh.setOnAction(e -> {
+            if (weChatDB == null) {
+                appendLog("❗ 请先初始化数据库");
+                return;
+            }
+            String selected = lstMonitoredGroups.getSelectionModel().getSelectedItem();
+            if (selected == null) {
+                selected = lstSearchResults.getSelectionModel().getSelectedItem();
+            }
+            if (selected != null) {
+                String username = extractUsername(selected);
+                if (username != null) {
+                    appendLog("📜 正在加载群聊历史消息...");
+                    loadGroupHistoryMessages(username);
+                }
+            } else {
+                appendLog("❗ 请先选择群聊");
+            }
+        });
+
+        lstMonitoredGroups.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal != null) {
+                String username = extractUsername(newVal);
+                selectedGroupChat = username;
+                if (!skipGroupHistoryLoad && weChatDB != null && username != null) {
+                    loadGroupHistoryMessages(username);
+                }
+                showChatBuffer(username, txtGroupMessages);
+            } else {
+                selectedGroupChat = null;
+            }
+            skipGroupHistoryLoad = false;
+        });
+
+        panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
+                controlBox, lblMonitored, lstMonitoredGroups, lblMessages, txtGroupMessages);
         return panel;
     }
 
@@ -737,17 +911,19 @@ public class MainController implements Initializable {
         }
         try {
             var msgs = weChatDB.getAllMessages(username);
-            // 按 localId 去重（保留最后出现的）
+            if (msgs == null) {
+                appendLog("❗ 查询返回 null，跳过");
+                return;
+            }
             java.util.LinkedHashMap<Long, ChatMessage> deduped = new java.util.LinkedHashMap<>();
             for (var m : msgs) {
-                deduped.put(m.getLocalId(), m);
+                if (m != null) deduped.put(m.getLocalId(), m);
             }
             var unique = new java.util.ArrayList<>(deduped.values());
-            // 按 create_time 正序排列
             unique.sort((a, b) -> Long.compare(a.getCreateTime(), b.getCreateTime()));
-            // 解析发送者昵称并格式化
             java.util.Map<String, String> nameCache = new java.util.HashMap<>();
-            txtMonitorMessages.clear();
+            // 构建历史消息并写入缓冲区
+            StringBuilder historyBuf = new StringBuilder();
             for (var m : unique) {
                 String time = m.getCreateTime() > 0
                         ? java.time.Instant.ofEpochSecond(m.getCreateTime())
@@ -760,12 +936,100 @@ public class MainController implements Initializable {
                     content = content.substring(0, 200) + "...";
                 }
                 String typeTag = m.getLocalType() != 1 ? "[" + m.getTypeDescription() + "] " : "";
-                txtMonitorMessages.appendText(String.format("[%s] %s: %s%s\n", time, senderDisplay, typeTag, content != null ? content : ""));
+                historyBuf.append(String.format("[%s] %s: %s%s\n", time, senderDisplay, typeTag, content != null ? content : ""));
             }
-            txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
+            // 存入缓冲区（历史 + 后续新消息）
+            StringBuilder buffer = chatBuffers.computeIfAbsent(username, k -> new StringBuilder());
+            synchronized (buffer) {
+                buffer.insert(0, historyBuf.toString());
+            }
+            // 如果当前选中的就是这个聊天，立即显示
+            if (username.equals(selectedPrivateChat)) {
+                showChatBuffer(username, txtMonitorMessages);
+            }
             appendLog("📩 已加载 " + unique.size() + " 条历史消息（去重后）");
         } catch (Exception e) {
-            appendLog("❗ 加载历史消息失败: " + e.getMessage());
+            appendLog("❗ 加载历史消息失败: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+            if (e.getCause() != null) {
+                appendLog("  原因: " + e.getCause().getClass().getSimpleName() + " - " + e.getCause().getMessage());
+            }
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 刷新群聊监听列表
+     */
+    private void refreshMonitoredGroupList() {
+        if (lstMonitoredGroups == null || messageMonitor == null) return;
+        lstMonitoredGroups.getItems().clear();
+        for (String username : messageMonitor.getMonitoredUsernames()) {
+            if (username.endsWith("@chatroom")) {
+                try {
+                    Contact c = weChatDB.getContact(username);
+                    String display = (c != null ? c.getDisplayName() : username) + " (" + username + ")";
+                    lstMonitoredGroups.getItems().add(display);
+                } catch (Exception e) {
+                    lstMonitoredGroups.getItems().add(username);
+                }
+            }
+        }
+    }
+
+    /**
+     * 加载指定群聊的所有历史消息（去重 + 时间正序）
+     */
+    private void loadGroupHistoryMessages(String username) {
+        if (weChatDB == null) {
+            appendLog("❗ 数据库未初始化");
+            return;
+        }
+        try {
+            var msgs = weChatDB.getAllMessages(username);
+            if (msgs == null) {
+                appendLog("❗ 查询返回 null，跳过");
+                return;
+            }
+            java.util.LinkedHashMap<Long, ChatMessage> deduped = new java.util.LinkedHashMap<>();
+            for (var m : msgs) {
+                if (m != null) deduped.put(m.getLocalId(), m);
+            }
+            var unique = new java.util.ArrayList<>(deduped.values());
+            unique.sort((a, b) -> Long.compare(a.getCreateTime(), b.getCreateTime()));
+            java.util.Map<String, String> nameCache = new java.util.HashMap<>();
+            StringBuilder historyBuf = new StringBuilder();
+            for (var m : unique) {
+                String time = m.getCreateTime() > 0
+                        ? java.time.Instant.ofEpochSecond(m.getCreateTime())
+                            .atZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                        : "??:??:??";
+                String senderDisplay = resolveSenderName(m.getSenderId(), nameCache);
+                String content = m.getMessageContent();
+                if (content != null && content.contains(":\n")) {
+                    int colonIdx = content.indexOf(":\n");
+                    content = content.substring(colonIdx + 2);
+                }
+                if (content != null && content.length() > 200) {
+                    content = content.substring(0, 200) + "...";
+                }
+                String typeTag = m.getLocalType() != 1 ? "[" + m.getTypeDescription() + "] " : "";
+                historyBuf.append(String.format("[%s] %s: %s%s\n", time, senderDisplay, typeTag, content != null ? content : ""));
+            }
+            StringBuilder buffer = chatBuffers.computeIfAbsent(username, k -> new StringBuilder());
+            synchronized (buffer) {
+                buffer.insert(0, historyBuf.toString());
+            }
+            if (username.equals(selectedGroupChat)) {
+                showChatBuffer(username, txtGroupMessages);
+            }
+            appendLog("📩 已加载群聊 " + unique.size() + " 条历史消息（去重后）");
+        } catch (Exception e) {
+            appendLog("❗ 加载群聊历史消息失败: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+            if (e.getCause() != null) {
+                appendLog("  原因: " + e.getCause().getClass().getSimpleName() + " - " + e.getCause().getMessage());
+            }
+            e.printStackTrace();
         }
     }
 
@@ -795,6 +1059,100 @@ public class MainController implements Initializable {
         } catch (Exception ignored) {}
         nameCache.put(senderId, display);
         return display;
+    }
+
+    /**
+     * 设置统一的新消息回调，支持多聊天同时监听。
+     * 消息按 chatUsername 路由到对应的缓冲区，并更新当前选中聊天的显示。
+     */
+    private void setupMessageCallback() {
+        messageMonitor.setOnNewMessage(mm -> {
+            String chatUser = mm.getChatUsername();
+            String line = mm.toDisplayString() + "\n";
+            // 追加到该聊天的缓冲区
+            StringBuilder buffer = chatBuffers.computeIfAbsent(chatUser, k -> new StringBuilder());
+            synchronized (buffer) {
+                buffer.append(line);
+                trimBuffer(buffer);
+            }
+            // 如果该聊天是当前选中的，实时更新显示
+            if (chatUser.equals(selectedPrivateChat) && txtMonitorMessages != null) {
+                Platform.runLater(() -> {
+                    txtMonitorMessages.appendText(line);
+                    privateMsgCount++;
+                    if (privateMsgCount >= MAX_BUFFER_LINES) {
+                        trimTextArea(txtMonitorMessages);
+                        privateMsgCount = 0;
+                    }
+                    txtMonitorMessages.setScrollTop(Double.MAX_VALUE);
+                });
+            }
+            if (chatUser.equals(selectedGroupChat) && txtGroupMessages != null) {
+                Platform.runLater(() -> {
+                    txtGroupMessages.appendText(line);
+                    groupMsgCount++;
+                    if (groupMsgCount >= MAX_BUFFER_LINES) {
+                        trimTextArea(txtGroupMessages);
+                        groupMsgCount = 0;
+                    }
+                    txtGroupMessages.setScrollTop(Double.MAX_VALUE);
+                });
+            }
+            // 日志始终记录
+            Platform.runLater(() -> appendLog("📩 [" + mm.getChatDisplayName() + "] " +
+                    mm.getSenderDisplayName() + ": " +
+                    (mm.getContent() != null && mm.getContent().length() > 50
+                            ? mm.getContent().substring(0, 50) + "..."
+                            : mm.getContent())));
+        });
+    }
+
+    /**
+     * 显示指定聊天的消息缓冲区到目标 TextArea
+     */
+    private void showChatBuffer(String username, TextArea textArea) {
+        if (username == null || textArea == null) return;
+        StringBuilder buffer = chatBuffers.get(username);
+        textArea.clear();
+        if (buffer != null) {
+            synchronized (buffer) {
+                textArea.setText(buffer.toString());
+            }
+            textArea.setScrollTop(Double.MAX_VALUE);
+        }
+    }
+
+    /**
+     * 截断缓冲区，保留最后 MAX_BUFFER_LINES 行
+     */
+    private void trimBuffer(StringBuilder buffer) {
+        int count = 0;
+        int idx = buffer.length();
+        while (idx > 0) {
+            idx = buffer.lastIndexOf("\n", idx - 1);
+            count++;
+            if (count > MAX_BUFFER_LINES) {
+                buffer.delete(0, idx + 1);
+                return;
+            }
+        }
+    }
+
+    /**
+     * 裁剪 TextArea，保留最后 MAX_BUFFER_LINES 行
+     */
+    private void trimTextArea(TextArea textArea) {
+        String text = textArea.getText();
+        int count = 0;
+        int idx = text.length();
+        while (idx > 0) {
+            idx = text.lastIndexOf('\n', idx - 1);
+            count++;
+            if (count > MAX_BUFFER_LINES) {
+                textArea.setText(text.substring(idx + 1));
+                return;
+            }
+        }
     }
 
     /**
