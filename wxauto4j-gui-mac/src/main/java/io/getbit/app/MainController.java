@@ -605,8 +605,17 @@ public class MainController implements Initializable {
         txtMonitorMessages = new TextArea();
         txtMonitorMessages.setEditable(false);
         txtMonitorMessages.setWrapText(true);
-        txtMonitorMessages.setPrefRowCount(15);
+        txtMonitorMessages.setPrefRowCount(12);
         VBox.setVgrow(txtMonitorMessages, javafx.scene.layout.Priority.ALWAYS);
+
+        // ===== 发送消息区域 =====
+        Label lblSend = new Label("发送消息:");
+        lblSend.getStyleClass().add("sub-title");
+        TextField txtSendMessage = createTextField("输入消息内容", 400);
+        Button btnSendMessage = new Button("📤 发送");
+        btnSendMessage.getStyleClass().add("btn-primary");
+        HBox sendBox = new HBox(8, txtSendMessage, btnSendMessage);
+        sendBox.setAlignment(Pos.CENTER_LEFT);
 
         // ===== 事件绑定 =====
         btnSearch.setOnAction(e -> {
@@ -710,8 +719,40 @@ public class MainController implements Initializable {
             skipHistoryLoad = false;
         });
 
+        // 发送消息按钮
+        btnSendMessage.setOnAction(e -> {
+            String msg = txtSendMessage.getText().trim();
+            if (msg.isEmpty()) {
+                showError("未输入", "请输入要发送的消息内容");
+                return;
+            }
+            // 从监听列表获取当前选中项的显示名称
+            String selectedItem = lstMonitoredContacts.getSelectionModel().getSelectedItem();
+            if (selectedItem == null) {
+                showError("未选择", "请先在监听列表中选择一个联系人");
+                return;
+            }
+            String chatName = extractDisplayName(selectedItem);
+            appendLog("📤 正在发送消息给 " + chatName + "...");
+            btnSendMessage.setDisable(true);
+            // 在后台线程执行 AppleScript（会阻塞几秒）
+            executor.submit(() -> {
+                String result = WeChatSender.sendTextMessage(chatName, msg);
+                Platform.runLater(() -> {
+                    btnSendMessage.setDisable(false);
+                    if ("ok".equals(result)) {
+                        appendLog("✅ 消息已发送给 " + chatName);
+                        txtSendMessage.clear();
+                    } else {
+                        appendLog("❗ 发送失败: " + result);
+                    }
+                });
+            });
+        });
+
         panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
-                controlBox, lblMonitored, lstMonitoredContacts, lblMessages, txtMonitorMessages);
+                controlBox, lblMonitored, lstMonitoredContacts, lblMessages, txtMonitorMessages,
+                lblSend, sendBox);
         return panel;
     }
 
@@ -765,8 +806,17 @@ public class MainController implements Initializable {
         txtGroupMessages = new TextArea();
         txtGroupMessages.setEditable(false);
         txtGroupMessages.setWrapText(true);
-        txtGroupMessages.setPrefRowCount(15);
+        txtGroupMessages.setPrefRowCount(12);
         VBox.setVgrow(txtGroupMessages, javafx.scene.layout.Priority.ALWAYS);
+
+        // ===== 发送消息区域 =====
+        Label lblSend = new Label("发送消息:");
+        lblSend.getStyleClass().add("sub-title");
+        TextField txtGroupSendMessage = createTextField("输入消息内容", 400);
+        Button btnGroupSendMessage = new Button("📤 发送");
+        btnGroupSendMessage.getStyleClass().add("btn-primary");
+        HBox sendBox = new HBox(8, txtGroupSendMessage, btnGroupSendMessage);
+        sendBox.setAlignment(Pos.CENTER_LEFT);
 
         // ===== 事件绑定 =====
         btnSearch.setOnAction(e -> {
@@ -866,8 +916,38 @@ public class MainController implements Initializable {
             skipGroupHistoryLoad = false;
         });
 
+        // 发送消息按钮
+        btnGroupSendMessage.setOnAction(e -> {
+            String msg = txtGroupSendMessage.getText().trim();
+            if (msg.isEmpty()) {
+                showError("未输入", "请输入要发送的消息内容");
+                return;
+            }
+            String selectedItem = lstMonitoredGroups.getSelectionModel().getSelectedItem();
+            if (selectedItem == null) {
+                showError("未选择", "请先在监听列表中选择一个群聊");
+                return;
+            }
+            String chatName = extractDisplayName(selectedItem);
+            appendLog("📤 正在发送消息到群聊 " + chatName + "...");
+            btnGroupSendMessage.setDisable(true);
+            executor.submit(() -> {
+                String result = WeChatSender.sendTextMessage(chatName, msg);
+                Platform.runLater(() -> {
+                    btnGroupSendMessage.setDisable(false);
+                    if ("ok".equals(result)) {
+                        appendLog("✅ 消息已发送到群聊 " + chatName);
+                        txtGroupSendMessage.clear();
+                    } else {
+                        appendLog("❗ 发送失败: " + result);
+                    }
+                });
+            });
+        });
+
         panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
-                controlBox, lblMonitored, lstMonitoredGroups, lblMessages, txtGroupMessages);
+                controlBox, lblMonitored, lstMonitoredGroups, lblMessages, txtGroupMessages,
+                lblSend, sendBox);
         return panel;
     }
 
@@ -880,6 +960,18 @@ public class MainController implements Initializable {
         int end = displayText.lastIndexOf(')');
         if (start >= 0 && end > start) {
             return displayText.substring(start + 1, end);
+        }
+        return displayText;
+    }
+
+    /**
+     * 从显示文本中提取显示名称（括号前的部分）
+     */
+    private String extractDisplayName(String displayText) {
+        if (displayText == null) return null;
+        int idx = displayText.lastIndexOf('(');
+        if (idx > 0) {
+            return displayText.substring(0, idx).trim();
         }
         return displayText;
     }
