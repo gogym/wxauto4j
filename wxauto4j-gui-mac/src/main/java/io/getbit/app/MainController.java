@@ -18,6 +18,7 @@ import javafx.scene.control.*;
 import javafx.scene.layout.*;
 
 import java.net.URL;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -224,7 +225,7 @@ public class MainController implements Initializable {
         Label dbKeyTitle = new Label("🔐 数据库密钥");
         dbKeyTitle.getStyleClass().add("section-title");
 
-        Label desc = new Label("点击「一键初始化」，自动完成：创建微信无签名副本 → 启动微信 → 扫码登录 → 提取密钥 → 保存配置 → 清理副本");
+        Label desc = new Label("点击「一键初始化」，自动完成：创建微信无签名副本 → 启动微信 → 扫码登录 → 提取密钥 → 保存配置");
         desc.setWrapText(true);
         desc.getStyleClass().add("sub-title");
 
@@ -451,19 +452,13 @@ public class MainController implements Initializable {
                         Platform.runLater(() -> appendLog("⚠️ [4/5] 数据库初始化失败（可稍后手动初始化）: " + ex.getMessage()));
                     }
 
-                    // ===== 步骤5：删除无签名副本 =====
-                    Platform.runLater(() -> appendLog("🗑 [5/5] 正在清理微信无签名副本..."));
-                    try {
-                        new ProcessBuilder("rm", "-rf", "/tmp/WeChat_copy.app").start().waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
-                        Platform.runLater(() -> appendLog("✅ [5/5] 副本已清理"));
-                    } catch (Exception ex) {
-                        Platform.runLater(() -> appendLog("⚠️ [5/5] 清理副本失败（可手动删除 /tmp/WeChat_copy.app）: " + ex.getMessage()));
-                    }
+                    // ===== 步骤5：完成 =====
+                    Platform.runLater(() -> appendLog("✅ [5/5] 流程完成，微信副本保留在 /tmp/WeChat_copy.app"));
 
                     Platform.runLater(() -> {
                         btnOneClick.setDisable(false);
                         btnOneClick.setText("🚀 一键初始化");
-                        appendLog("🎉 一键初始化完成！密钥已保存，数据库已就绪。");
+                        appendLog("🎉 一键初始化完成！密钥已保存，数据库已就绪。可通过「启动微信副本」按钮再次启动微信。");
                     });
                 } catch (Exception ex) {
                     Platform.runLater(() -> {
@@ -549,7 +544,24 @@ public class MainController implements Initializable {
             });
         });
 
-        btnBox.getChildren().addAll(btnOneClick, btnSaveKey, btnDecrypt);
+        Button btnLaunchWeChat = new Button("💬 启动微信副本");
+        btnLaunchWeChat.getStyleClass().add("btn-default");
+        btnLaunchWeChat.setOnAction(e -> {
+            String copyApp = "/tmp/WeChat_copy.app";
+            if (!new java.io.File(copyApp).exists()) {
+                showError("副本不存在", "微信无签名副本不存在，请先执行一键初始化");
+                return;
+            }
+            appendLog("🚀 正在启动微信副本...");
+            try {
+                new ProcessBuilder("open", copyApp).start();
+                appendLog("✅ 微信副本已启动");
+            } catch (Exception ex) {
+                appendLog("❌ 启动微信副本失败: " + ex.getMessage());
+            }
+        });
+
+        btnBox.getChildren().addAll(btnOneClick, btnLaunchWeChat, btnSaveKey, btnDecrypt);
         panel.getChildren().addAll(title, lblConfigStatus, lblConfigDir, btnRefresh,
                 dbKeyTitle, desc, lblDbKeyStatus, lblKey, txtKey, btnBox);
         return panel;
