@@ -17,6 +17,7 @@
   <modules>
     <module>wxauto4j-lib</module>
     <module>wxauto4j-gui-mac</module>
+    <module>wxauto4j-gui-win</module>
   </modules>
 
   <dependencyManagement>

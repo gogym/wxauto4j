@@ -138,22 +138,34 @@ public class WeChatDBConfig {
      * 在系统 PATH 中查找 sqlcipher
      */
     private static String findSqlcipher() {
-        List<String> candidates = Arrays.asList(
-                "/usr/local/bin/sqlcipher",
-                "/opt/homebrew/bin/sqlcipher",
-                "/usr/bin/sqlcipher"
-        );
+        String os = System.getProperty("os.name", "").toLowerCase();
+        List<String> candidates;
+        if (os.contains("win")) {
+            candidates = Arrays.asList(
+                    "C:\\Program Files\\sqlcipher\\sqlcipher.exe",
+                    "C:\\Program Files (x86)\\sqlcipher\\sqlcipher.exe",
+                    System.getProperty("user.home") + "\\scoop\\shims\\sqlcipher.exe"
+            );
+        } else {
+            candidates = Arrays.asList(
+                    "/usr/local/bin/sqlcipher",
+                    "/opt/homebrew/bin/sqlcipher",
+                    "/usr/bin/sqlcipher"
+            );
+        }
         for (String path : candidates) {
             if (new File(path).exists()) return path;
         }
         String pathEnv = System.getenv("PATH");
         if (pathEnv != null) {
-            for (String dir : pathEnv.split(":")) {
-                File f = new File(dir, "sqlcipher");
+            String separator = os.contains("win") ? ";" : ":";
+            String exeName = os.contains("win") ? "sqlcipher.exe" : "sqlcipher";
+            for (String dir : pathEnv.split(separator)) {
+                File f = new File(dir, exeName);
                 if (f.exists()) return f.getAbsolutePath();
             }
         }
-        return "sqlcipher";
+        return os.contains("win") ? "sqlcipher.exe" : "sqlcipher";
     }
 
     // ==================== Getters & Setters ====================
@@ -202,14 +214,16 @@ public class WeChatDBConfig {
      * 获取 db_storage 根目录
      */
     public String getDbStorageDir() {
-        return wechatDataDir + "/" + wxId + "/db_storage";
+        String sep = java.io.File.separator;
+        return wechatDataDir + sep + wxId + sep + "db_storage";
     }
 
     /**
      * 获取指定数据库的加密文件路径
      */
     public String getEncryptedDbPath(String category, String dbName) {
-        return getDbStorageDir() + "/" + category + "/" + dbName;
+        String sep = java.io.File.separator;
+        return getDbStorageDir() + sep + category + sep + dbName;
     }
 
     /**

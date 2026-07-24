@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.scene.image.ImageView?>
+
+<BorderPane xmlns="http://javafx.com/javafx"
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="io.getbit.app.MainController"
+            styleClass="root-pane">
+
+    <!-- 顶部工具栏 -->
+    <top>
+        <HBox styleClass="toolbar" spacing="10" alignment="CENTER_LEFT">
+            <padding>
+                <Insets top="8" right="12" bottom="8" left="12"/>
+            </padding>
+            <Label fx:id="lblStatus" text="● 就绪" styleClass="status-connected"/>
+            <Region HBox.hgrow="ALWAYS"/>
+        </HBox>
+    </top>
+
+    <!-- 左侧导航树 -->
+    <left>
+        <VBox prefWidth="200" styleClass="sidebar">
+            <Label text="wxauto4j" styleClass="sidebar-title">
+                <padding>
+                    <Insets top="12" right="10" bottom="8" left="10"/>
+                </padding>
+            </Label>
+            <TreeView fx:id="navTree" VBox.vgrow="ALWAYS" styleClass="nav-tree" showRoot="false"/>
+        </VBox>
+    </left>
+
+    <!-- 中心内容区 -->
+    <center>
+        <StackPane fx:id="contentPane" styleClass="content-pane">
+            <padding>
+                <Insets top="10" right="10" bottom="10" left="10"/>
+            </padding>
+        </StackPane>
+    </center>
+
+    <!-- 底部日志面板 -->
+    <bottom>
+        <VBox styleClass="log-panel" spacing="4">
+            <padding>
+                <Insets top="4" right="10" bottom="6" left="10"/>
+            </padding>
+            <HBox alignment="CENTER_LEFT" spacing="8">
+                <Label text="运行日志" styleClass="log-title"/>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Button fx:id="btnClearLog" text="清空" onAction="#onClearLog" styleClass="btn-small"/>
+            </HBox>
+            <TextArea fx:id="txtLog" editable="false" prefRowCount="5" wrapText="true"
+                      styleClass="log-area" VBox.vgrow="ALWAYS"/>
+        </VBox>
+    </bottom>
+
+</BorderPane>

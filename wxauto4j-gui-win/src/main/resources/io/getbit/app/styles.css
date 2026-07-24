@@ -1,0 +1,221 @@
+/* ==================== 全局 ==================== */
+.root-pane {
+    -fx-background-color: #f5f5f5;
+    -fx-font-family: "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
+    -fx-font-size: 13px;
+}
+
+/* ==================== 工具栏 ==================== */
+.toolbar {
+    -fx-background-color: #ffffff;
+    -fx-border-color: transparent transparent #e0e0e0 transparent;
+    -fx-border-width: 0 0 1 0;
+}
+
+.btn-primary {
+    -fx-background-color: #07c160;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 6 16 6 16;
+    -fx-background-radius: 4;
+    -fx-cursor: hand;
+}
+.btn-primary:hover {
+    -fx-background-color: #06ad56;
+}
+
+.btn-success {
+    -fx-background-color: #1890ff;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 6 16 6 16;
+    -fx-background-radius: 4;
+    -fx-cursor: hand;
+}
+.btn-success:hover {
+    -fx-background-color: #096dd9;
+}
+.btn-success:disabled {
+    -fx-background-color: #c0c0c0;
+    -fx-text-fill: #888;
+}
+
+.btn-small {
+    -fx-background-color: transparent;
+    -fx-text-fill: #666;
+    -fx-padding: 2 8 2 8;
+    -fx-border-color: #d0d0d0;
+    -fx-border-radius: 3;
+    -fx-background-radius: 3;
+    -fx-cursor: hand;
+}
+.btn-small:hover {
+    -fx-background-color: #f0f0f0;
+}
+
+/* ==================== 状态标签 ==================== */
+.status-connected {
+    -fx-text-fill: #07c160;
+    -fx-font-weight: bold;
+}
+.status-disconnected {
+    -fx-text-fill: #999;
+}
+
+.bot-status {
+    -fx-text-fill: #1890ff;
+    -fx-font-weight: bold;
+}
+
+/* ==================== 侧边栏 ==================== */
+.sidebar {
+    -fx-background-color: #2b2f3a;
+    -fx-border-color: transparent #1e222b transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+.sidebar-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #ffffff;
+}
+
+/* TreeView 导航 */
+.nav-tree {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+.nav-tree .tree-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: #c0c4cc;
+    -fx-padding: 8 10 8 16;
+    -fx-font-size: 13px;
+}
+.nav-tree .tree-cell:hover {
+    -fx-background-color: #363b48;
+    -fx-text-fill: #ffffff;
+}
+.nav-tree .tree-cell:selected {
+    -fx-background-color: #07c160;
+    -fx-text-fill: #ffffff;
+    -fx-font-weight: bold;
+}
+.nav-tree .tree-disclosure-node {
+    -fx-background-color: transparent;
+}
+.nav-tree .tree-disclosure-node .arrow {
+    -fx-background-color: #666;
+}
+
+/* ==================== 内容区 ==================== */
+.content-pane {
+    -fx-background-color: #ffffff;
+}
+
+/* ==================== 日志面板 ==================== */
+.log-panel {
+    -fx-background-color: #fafafa;
+    -fx-border-color: #e0e0e0 transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.log-title {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #666;
+}
+.log-area {
+    -fx-background-color: #1e1e1e;
+    -fx-text-fill: #d4d4d4;
+    -fx-font-family: "Consolas", "Monaco", monospace;
+    -fx-font-size: 12px;
+    -fx-border-color: #333;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+}
+
+/* ==================== 表单控件 ==================== */
+.text-field {
+    -fx-background-color: #f7f7f7;
+    -fx-border-color: #d0d0d0;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-padding: 6 8 6 8;
+}
+.text-field:focused {
+    -fx-border-color: #07c160;
+}
+
+.text-area {
+    -fx-background-color: #f7f7f7;
+    -fx-border-color: #d0d0d0;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+}
+.text-area:focused {
+    -fx-border-color: #07c160;
+}
+
+/* ==================== 列表 ==================== */
+.list-view {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+.list-cell {
+    -fx-padding: 6 10 6 10;
+    -fx-background-color: transparent;
+}
+.list-cell:filled:hover {
+    -fx-background-color: #f0f0f0;
+}
+.list-cell:filled:selected {
+    -fx-background-color: #e6f7ff;
+}
+
+/* ==================== 分组标题 ==================== */
+.section-title {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #333;
+    -fx-padding: 8 0 4 0;
+}
+
+.sub-title {
+    -fx-font-size: 12px;
+    -fx-text-fill: #666;
+    -fx-padding: 4 0 2 0;
+}
+
+/* ==================== 卡片 ==================== */
+.card {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #e8e8e8;
+    -fx-border-radius: 6;
+    -fx-background-radius: 6;
+    -fx-padding: 12;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.05), 4, 0, 0, 2);
+}
+
+/* ==================== 按钮组 ==================== */
+.btn-danger {
+    -fx-background-color: #ff4d4f;
+    -fx-text-fill: white;
+    -fx-padding: 4 12 4 12;
+    -fx-background-radius: 4;
+    -fx-cursor: hand;
+}
+.btn-danger:hover {
+    -fx-background-color: #d9363e;
+}
+
+.btn-default {
+    -fx-background-color: #ffffff;
+    -fx-text-fill: #333;
+    -fx-border-color: #d0d0d0;
+    -fx-padding: 4 12 4 12;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-cursor: hand;
+}
+.btn-default:hover {
+    -fx-border-color: #07c160;
+    -fx-text-fill: #07c160;
+}
