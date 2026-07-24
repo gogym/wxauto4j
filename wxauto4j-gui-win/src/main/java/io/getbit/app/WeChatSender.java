@@ -115,25 +115,27 @@ public class WeChatSender {
      */
     private static void activateWeChatWindow() throws Exception {
         String script =
-                "Add-Type @\"\n" +
+                "# 微信 4.x: 通过进程名查找主窗口\n" +
+                "$proc = Get-Process -Name 'Weixin' -ErrorAction SilentlyContinue | Select-Object -First 1\n" +
+                "if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {\n" +
+                "    $hwnd = $proc.MainWindowHandle\n" +
+                "} else {\n" +
+                "    $hwnd = [IntPtr]::Zero\n" +
+                "}\n" +
+                "if ($hwnd -ne [IntPtr]::Zero) {\n" +
+                "    Add-Type @\"\n" +
                 "using System;\n" +
                 "using System.Runtime.InteropServices;\n" +
                 "public class WinAPI {\n" +
-                "    [DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);\n" +
                 "    [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);\n" +
                 "    [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n" +
-                "    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }\n" +
-                "    [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n" +
                 "}\n" +
                 "\"@\n" +
-                "$hwnd = [WinAPI]::FindWindow(\"WeChatMainWndForPC\", $null)\n" +
-                "if ($hwnd -eq [IntPtr]::Zero) { $hwnd = [WinAPI]::FindWindow($null, \"微信\") }\n" +
-                "if ($hwnd -ne [IntPtr]::Zero) {\n" +
                 "    [WinAPI]::ShowWindow($hwnd, 9)\n" +
                 "    [WinAPI]::SetForegroundWindow($hwnd)\n" +
-                "    Write-Output \"OK\"\n" +
+                "    Write-Output 'OK'\n" +
                 "} else {\n" +
-                "    Write-Output \"NOT_FOUND\"\n" +
+                "    Write-Output 'NOT_FOUND'\n" +
                 "}";
 
         String result = runPowerShell(script);
@@ -148,18 +150,18 @@ public class WeChatSender {
     private static int[] getWeChatWindowRect() {
         try {
             String script =
-                    "Add-Type @\"\n" +
+                    "# 微信 4.x: 通过进程名查找主窗口\n" +
+                    "$proc = Get-Process -Name 'Weixin' -ErrorAction SilentlyContinue | Select-Object -First 1\n" +
+                    "if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {\n" +
+                    "    $hwnd = $proc.MainWindowHandle\n" +
+                    "    Add-Type @\"\n" +
                     "using System;\n" +
                     "using System.Runtime.InteropServices;\n" +
                     "public class WinAPI2 {\n" +
-                    "    [DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);\n" +
                     "    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }\n" +
                     "    [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n" +
                     "}\n" +
                     "\"@\n" +
-                    "$hwnd = [WinAPI2]::FindWindow(\"WeChatMainWndForPC\", $null)\n" +
-                    "if ($hwnd -eq [IntPtr]::Zero) { $hwnd = [WinAPI2]::FindWindow($null, \"微信\") }\n" +
-                    "if ($hwnd -ne [IntPtr]::Zero) {\n" +
                     "    $rect = New-Object WinAPI2+RECT\n" +
                     "    [WinAPI2]::GetWindowRect($hwnd, [ref]$rect)\n" +
                     "    Write-Output \"$($rect.Left),$($rect.Top),$($rect.Right - $rect.Left),$($rect.Bottom - $rect.Top)\"\n" +

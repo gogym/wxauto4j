@@ -18,7 +18,7 @@ public class AppConfig {
     /** 微信 SQLCipher raw key（64字符 hex），通过 Frida 提取得到 */
     private String wxRawKey = "";
 
-    /** 微信数据目录（xwechat_files），用于定位加密数据库 */
+    /** 微信数据目录（xwechat），用于定位加密数据库 */
     private String wxDataDir = detectDefaultWxDataDir();
 
     /** 解密后数据库输出目录 */
@@ -29,8 +29,8 @@ public class AppConfig {
         String os = System.getProperty("os.name", "").toLowerCase();
         String home = System.getProperty("user.home");
         if (os.contains("win")) {
-            // Windows: C:\Users\xxx\AppData\Roaming\Tencent\xwechat_files
-            return home + "\\AppData\\Roaming\\Tencent\\xwechat_files";
+            // Windows 微信 4.x: %APPDATA%\Tencent\xwechat
+            return home + "\\AppData\\Roaming\\Tencent\\xwechat";
         } else {
             // macOS: ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files
             return home + "/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files";
