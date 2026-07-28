@@ -1,7 +1,9 @@
 package io.getbit.app;
 
 import io.getbit.app.config.AppConfig;
+import io.getbit.app.config.AtReminderRule;
 import io.getbit.app.config.ConfigManager;
+import io.getbit.app.bot.AtReminderTracker;
 import io.getbit.wxdb.WeChatDB;
 import io.getbit.wxdb.WeChatDBConfig;
 import io.getbit.wxdb.frida.FridaKeyExtractor;
@@ -45,7 +47,7 @@ public class MainController implements Initializable {
     private TreeView<String> navTree;
 
     @FXML
-    private StackPane contentPane;
+    private ScrollPane contentScrollPane;
 
     @FXML
     private TextArea txtLog;
@@ -90,6 +92,7 @@ public class MainController implements Initializable {
 
     /** 群聊监听面板的监听列表 */
     private ListView<String> lstMonitoredGroups;
+    private ComboBox<String> cbSourceGroupRef;
 
     /** 密钥输入框 */
     private TextField txtKey;
@@ -112,6 +115,9 @@ public class MainController implements Initializable {
     /** TextArea 追加计数器，用于定期裁剪 */
     private int privateMsgCount = 0;
     private int groupMsgCount = 0;
+
+    /** @提醒追踪器 */
+    private AtReminderTracker atReminderTracker;
 
     /** 当前私聊面板选中的 username */
     private volatile String selectedPrivateChat = null;
@@ -190,7 +196,7 @@ public class MainController implements Initializable {
     private void showPanel(String name) {
         Node panel = panels.get(name);
         if (panel != null) {
-            contentPane.getChildren().setAll(panel);
+            contentScrollPane.setContent(panel);
             currentPanel = name;
         }
     }
@@ -447,6 +453,12 @@ public class MainController implements Initializable {
                         weChatDB.init();
                         messageMonitor = new MessageMonitor(weChatDB);
                         setupMessageCallback();
+                        // 初始化@提醒追踪器
+                        atReminderTracker = new AtReminderTracker(weChatDB, msg -> appendLog(msg));
+                        atReminderTracker.setMessageSender((chatName, message) -> WeChatSender.sendTextMessage(chatName, message));
+                        atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+                        // 自动加载监听群
+                        autoLoadMonitorGroups();
                         Platform.runLater(() -> appendLog("✅ [4/5] 数据库连接已就绪"));
                     } catch (Exception ex) {
                         Platform.runLater(() -> appendLog("⚠️ [4/5] 数据库初始化失败（可稍后手动初始化）: " + ex.getMessage()));
@@ -510,6 +522,12 @@ public class MainController implements Initializable {
                     weChatDB.init();
                     messageMonitor = new MessageMonitor(weChatDB);
                     setupMessageCallback();
+                    // 初始化@提醒追踪器
+                    atReminderTracker = new AtReminderTracker(weChatDB, msg -> appendLog(msg));
+                    atReminderTracker.setMessageSender((chatName, message) -> WeChatSender.sendTextMessage(chatName, message));
+                    atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+                    // 自动加载监听群
+                    autoLoadMonitorGroups();
 
                     Platform.runLater(() -> {
                         btnDecrypt.setDisable(false);
@@ -773,67 +791,102 @@ public class MainController implements Initializable {
      */
     private Node createGroupListenPanel() {
         VBox panel = new VBox(10);
-        panel.setPadding(new Insets(16));
+        panel.setPadding(new Insets(10));
 
-        Label title = new Label("群聊消息监听");
+        Label title = new Label("\ud83d\udcac \u7fa4\u804a\u6d88\u606f\u76d1\u542c");
         title.getStyleClass().add("section-title");
 
-        // ===== 搜索群聊区域 =====
-        Label lblSearch = new Label("搜索群聊:");
+        // ===== \u5de6\u4fa7\u9762\u677f\uff1a\u641c\u7d22 + \u76d1\u542c\u7ba1\u7406 =====
+        VBox leftPanel = new VBox(8);
+        leftPanel.setPrefWidth(320);
+        leftPanel.setStyle("-fx-background-color: #fafafa; -fx-border-color: #e8e8e8; -fx-border-radius: 6; -fx-background-radius: 6; -fx-padding: 10;");
+
+        // -- \u641c\u7d22\u7fa4\u804a --
+        Label lblSearch = new Label("\ud83d\udd0d \u641c\u7d22\u7fa4\u804a");
         lblSearch.getStyleClass().add("sub-title");
-        HBox searchBox = new HBox(8);
+        HBox searchBox = new HBox(6);
         searchBox.setAlignment(Pos.CENTER_LEFT);
-        TextField txtSearchGroup = createTextField("输入群名搜索", 250);
-        Button btnSearch = new Button("🔍 搜索");
+        TextField txtSearchGroup = createTextField("\u8f93\u5165\u7fa4\u540d\u641c\u7d22", 180);
+        HBox.setHgrow(txtSearchGroup, javafx.scene.layout.Priority.ALWAYS);
+        Button btnSearch = new Button("\u641c\u7d22");
         btnSearch.getStyleClass().add("btn-default");
         searchBox.getChildren().addAll(txtSearchGroup, btnSearch);
 
-        // 搜索结果列表（支持多选）
+        // \u641c\u7d22\u7ed3\u679c\u5217\u8868\uff08\u652f\u6301\u591a\u9009\uff09
         ListView<String> lstSearchResults = new ListView<>();
-        lstSearchResults.setPrefHeight(120);
+        lstSearchResults.setPrefHeight(160);
         lstSearchResults.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
+        lstSearchResults.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #ffffff; -fx-border-radius: 4; -fx-background-radius: 4;");
 
-        // ===== 监听控制区域 =====
-        HBox controlBox = new HBox(8);
+        // -- \u64cd\u4f5c\u6309\u94ae --
+        HBox controlBox = new HBox(6);
         controlBox.setAlignment(Pos.CENTER_LEFT);
-        Button btnAddMonitor = new Button("➕ 添加监听");
+        Button btnAddMonitor = new Button("+ \u6dfb\u52a0\u76d1\u542c");
         btnAddMonitor.getStyleClass().add("btn-success");
-        Button btnStopMonitor = new Button("⏹ 停止监听");
+        Button btnStopMonitor = new Button("\u23f9 \u505c\u6b62");
         btnStopMonitor.getStyleClass().add("btn-danger");
-        Button btnRefresh = new Button("📜 加载历史消息");
+        Button btnRefresh = new Button("\ud83d\udcdc \u5386\u53f2");
         btnRefresh.getStyleClass().add("btn-default");
         controlBox.getChildren().addAll(btnAddMonitor, btnStopMonitor, btnRefresh);
 
-        // 监听列表
-        Label lblMonitored = new Label("监听中的群聊（可多选停止）:");
+        CheckBox chkAutoMonitor = new CheckBox("\u81ea\u52a8\u76d1\u542c\uff08\u542f\u52a8\u65f6\u81ea\u52a8\u76d1\u542c\uff09");
+        chkAutoMonitor.setSelected(configManager.getConfig().getAutoMonitorGroups() != null
+                && !configManager.getConfig().getAutoMonitorGroups().isEmpty());
+
+        // -- \u76d1\u542c\u4e2d\u7684\u7fa4\u804a --
+        Label lblMonitored = new Label("\ud83d\udccc \u76d1\u542c\u4e2d\u7684\u7fa4\u804a\uff08\u53ef\u591a\u9009\u505c\u6b62\uff09");
         lblMonitored.getStyleClass().add("sub-title");
         lstMonitoredGroups = new ListView<>();
-        lstMonitoredGroups.setPrefHeight(120);
+        lstMonitoredGroups.setPrefHeight(140);
         lstMonitoredGroups.getSelectionModel().setSelectionMode(javafx.scene.control.SelectionMode.MULTIPLE);
-        lstMonitoredGroups.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #f7f7f7;");
+        lstMonitoredGroups.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #ffffff; -fx-border-radius: 4; -fx-background-radius: 4;");
 
-        // ===== 消息显示区域 =====
-        Label lblMessages = new Label("消息记录:");
+        leftPanel.getChildren().addAll(lblSearch, searchBox, lstSearchResults,
+                controlBox, chkAutoMonitor, lblMonitored, lstMonitoredGroups);
+
+        // ===== \u53f3\u4fa7\u9762\u677f\uff1a\u6d88\u606f + \u53d1\u9001 =====
+        VBox rightPanel = new VBox(8);
+        HBox.setHgrow(rightPanel, javafx.scene.layout.Priority.ALWAYS);
+
+        // -- \u6d88\u606f\u8bb0\u5f55 --
+        Label lblMessages = new Label("\ud83d\udcdd \u6d88\u606f\u8bb0\u5f55");
         lblMessages.getStyleClass().add("sub-title");
         txtGroupMessages = new TextArea();
         txtGroupMessages.setEditable(false);
         txtGroupMessages.setWrapText(true);
-        txtGroupMessages.setPrefRowCount(12);
-        VBox.setVgrow(txtGroupMessages, javafx.scene.layout.Priority.ALWAYS);
+        txtGroupMessages.setPrefRowCount(16);
+        txtGroupMessages.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #ffffff; -fx-border-radius: 4; -fx-background-radius: 4;");
 
-        // ===== 发送消息区域 =====
-        Label lblSend = new Label("发送消息:");
+        // -- \u53d1\u9001\u6d88\u606f --
+        Label lblSend = new Label("\ud83d\udce4 \u53d1\u9001\u6d88\u606f");
         lblSend.getStyleClass().add("sub-title");
-        TextField txtGroupSendMessage = createTextField("输入消息内容", 400);
-        Button btnGroupSendMessage = new Button("📤 发送");
+        TextField txtGroupSendMessage = createTextField("\u8f93\u5165\u6d88\u606f\u5185\u5bb9", 300);
+        HBox.setHgrow(txtGroupSendMessage, javafx.scene.layout.Priority.ALWAYS);
+        Button btnGroupSendMessage = new Button("\ud83d\udce4 \u53d1\u9001");
         btnGroupSendMessage.getStyleClass().add("btn-primary");
         HBox sendBox = new HBox(8, txtGroupSendMessage, btnGroupSendMessage);
         sendBox.setAlignment(Pos.CENTER_LEFT);
 
-        // ===== 事件绑定 =====
+        rightPanel.getChildren().addAll(lblMessages, txtGroupMessages, lblSend, sendBox);
+
+        // ===== \u7ec4\u5408\u5de6\u53f3\u4e24\u680f =====
+        HBox mainContent = new HBox(12);
+        mainContent.setAlignment(Pos.TOP_LEFT);
+        mainContent.getChildren().addAll(leftPanel, rightPanel);
+
+        // ===== @\u63d0\u9192\u89c4\u5219\u533a\u57df\uff08\u53ef\u6298\u53e0\uff09 =====
+        Node atReminderSection = createAtReminderPanel();
+        TitledPane atTitledPane = new TitledPane("\u23f0 @\u63d0\u9192\u89c4\u5219\u7ba1\u7406", atReminderSection);
+        atTitledPane.setCollapsible(true);
+        atTitledPane.setExpanded(false);
+        atTitledPane.setStyle("-fx-border-color: #e8e8e8; -fx-border-radius: 6; -fx-background-radius: 6;");
+
+        panel.getChildren().addAll(title, mainContent, atTitledPane);
+
+        // ===== \u4e8b\u4ef6\u7ed1\u5b9a =====
         btnSearch.setOnAction(e -> {
             if (weChatDB == null) {
-                appendLog("❗ 请先初始化数据库");
+                appendLog("\u2757 \u8bf7\u5148\u521d\u59cb\u5316\u6570\u636e\u5e93");
                 return;
             }
             String keyword = txtSearchGroup.getText().trim();
@@ -843,17 +896,17 @@ public class MainController implements Initializable {
                 String display = c.getDisplayName() + " (" + c.getUsername() + ")";
                 lstSearchResults.getItems().add(display);
             }
-            appendLog("搜索到 " + groups.size() + " 个群聊");
+            appendLog("\u641c\u7d22\u5230 " + groups.size() + " \u4e2a\u7fa4\u804a");
         });
 
         btnAddMonitor.setOnAction(e -> {
             if (weChatDB == null || messageMonitor == null) {
-                appendLog("❗ 请先初始化数据库");
+                appendLog("\u2757 \u8bf7\u5148\u521d\u59cb\u5316\u6570\u636e\u5e93");
                 return;
             }
             var selectedItems = lstSearchResults.getSelectionModel().getSelectedItems();
             if (selectedItems == null || selectedItems.isEmpty()) {
-                showError("未选择", "请先搜索并选择一个或多个群聊");
+                showError("\u672a\u9009\u62e9", "\u8bf7\u5148\u641c\u7d22\u5e76\u9009\u62e9\u4e00\u4e2a\u6216\u591a\u4e2a\u7fa4\u804a");
                 return;
             }
             var toAdd = new java.util.ArrayList<>(selectedItems);
@@ -862,7 +915,7 @@ public class MainController implements Initializable {
                 if (username != null) {
                     messageMonitor.startMonitoring(username);
                     chatBuffers.putIfAbsent(username, new StringBuilder());
-                    appendLog("✅ 开始监听群聊: " + selected);
+                    appendLog("\u2705 \u5f00\u59cb\u76d1\u542c\u7fa4\u804a: " + selected);
                 }
             }
             refreshMonitoredGroupList();
@@ -870,17 +923,33 @@ public class MainController implements Initializable {
                 skipGroupHistoryLoad = true;
                 lstMonitoredGroups.getSelectionModel().select(lstMonitoredGroups.getItems().size() - 1);
             }
-            appendLog("✅ 已添加 " + toAdd.size() + " 个群聊到监听列表");
+            appendLog("\u2705 \u5df2\u6dfb\u52a0 " + toAdd.size() + " \u4e2a\u7fa4\u804a\u5230\u76d1\u542c\u5217\u8868");
+
+            // \u5982\u679c\u52fe\u9009\u4e86\u81ea\u52a8\u76d1\u542c\uff0c\u5c06\u65b0\u589e\u7684\u7fa4\u52a0\u5165\u81ea\u52a8\u76d1\u542c\u5217\u8868
+            if (chkAutoMonitor.isSelected()) {
+                AppConfig cfg = configManager.getConfig();
+                List<String> autoList = cfg.getAutoMonitorGroups();
+                if (autoList == null) autoList = new java.util.ArrayList<>();
+                for (String selected : toAdd) {
+                    String username = extractUsername(selected);
+                    if (username != null && !autoList.contains(username)) {
+                        autoList.add(username);
+                    }
+                }
+                cfg.setAutoMonitorGroups(autoList);
+                configManager.save();
+                appendLog("\ud83d\udcbe \u5df2\u66f4\u65b0\u81ea\u52a8\u76d1\u542c\u7fa4\u5217\u8868");
+            }
         });
 
         btnStopMonitor.setOnAction(e -> {
             if (weChatDB == null || messageMonitor == null) {
-                appendLog("❗ 请先初始化数据库");
+                appendLog("\u2757 \u8bf7\u5148\u521d\u59cb\u5316\u6570\u636e\u5e93");
                 return;
             }
             var selectedItems = lstMonitoredGroups.getSelectionModel().getSelectedItems();
             if (selectedItems == null || selectedItems.isEmpty()) {
-                showError("未选择", "请先选择要停止监听的群聊");
+                showError("\u672a\u9009\u62e9", "\u8bf7\u5148\u9009\u62e9\u8981\u505c\u6b62\u76d1\u542c\u7684\u7fa4\u804a");
                 return;
             }
             var toStop = new java.util.ArrayList<>(selectedItems);
@@ -888,15 +957,47 @@ public class MainController implements Initializable {
                 String username = extractUsername(selected);
                 if (username != null) {
                     messageMonitor.stopMonitoring(username);
-                    appendLog("⏹ 停止监听群聊: " + selected);
+                    appendLog("\u23f9 \u505c\u6b62\u76d1\u542c\u7fa4\u804a: " + selected);
                 }
             }
             refreshMonitoredGroupList();
+
+            // \u540c\u65f6\u4ece\u81ea\u52a8\u76d1\u542c\u5217\u8868\u4e2d\u79fb\u9664
+            AppConfig cfg = configManager.getConfig();
+            List<String> autoList = cfg.getAutoMonitorGroups();
+            if (autoList != null) {
+                for (String selected : toStop) {
+                    String username = extractUsername(selected);
+                    if (username != null) autoList.remove(username);
+                }
+                cfg.setAutoMonitorGroups(autoList);
+                configManager.save();
+            }
+        });
+
+        // \u81ea\u52a8\u76d1\u542c\u52fe\u9009\u6846\u53d8\u5316\u65f6\u540c\u6b65\u5230\u914d\u7f6e
+        chkAutoMonitor.setOnAction(e -> {
+            AppConfig cfg2 = configManager.getConfig();
+            if (chkAutoMonitor.isSelected()) {
+                List<String> autoList2 = new java.util.ArrayList<>();
+                for (String uname : messageMonitor.getMonitoredUsernames()) {
+                    if (uname.endsWith("@chatroom")) {
+                        autoList2.add(uname);
+                    }
+                }
+                cfg2.setAutoMonitorGroups(autoList2);
+                configManager.save();
+                appendLog("\u5df2\u52a0\u5165\u81ea\u52a8\u76d1\u542c: " + autoList2.size() + " \u4e2a\u7fa4\u804a");
+            } else {
+                cfg2.setAutoMonitorGroups(new java.util.ArrayList<>());
+                configManager.save();
+                appendLog("\u5df2\u6e05\u7a7a\u81ea\u52a8\u76d1\u542c\u5217\u8868");
+            }
         });
 
         btnRefresh.setOnAction(e -> {
             if (weChatDB == null) {
-                appendLog("❗ 请先初始化数据库");
+                appendLog("\u2757 \u8bf7\u5148\u521d\u59cb\u5316\u6570\u636e\u5e93");
                 return;
             }
             String selected = lstMonitoredGroups.getSelectionModel().getSelectedItem();
@@ -906,11 +1007,11 @@ public class MainController implements Initializable {
             if (selected != null) {
                 String username = extractUsername(selected);
                 if (username != null) {
-                    appendLog("📜 正在加载群聊历史消息...");
+                    appendLog("\ud83d\udcdc \u6b63\u5728\u52a0\u8f7d\u7fa4\u804a\u5386\u53f2\u6d88\u606f...");
                     loadGroupHistoryMessages(username);
                 }
             } else {
-                appendLog("❗ 请先选择群聊");
+                appendLog("\u2757 \u8bf7\u5148\u9009\u62e9\u7fa4\u804a");
             }
         });
 
@@ -928,39 +1029,58 @@ public class MainController implements Initializable {
             skipGroupHistoryLoad = false;
         });
 
-        // 发送消息按钮
+        // \u53d1\u9001\u6d88\u606f\u6309\u94ae
         btnGroupSendMessage.setOnAction(e -> {
             String msg = txtGroupSendMessage.getText().trim();
             if (msg.isEmpty()) {
-                showError("未输入", "请输入要发送的消息内容");
+                showError("\u672a\u8f93\u5165", "\u8bf7\u8f93\u5165\u8981\u53d1\u9001\u7684\u6d88\u606f\u5185\u5bb9");
                 return;
             }
             String selectedItem = lstMonitoredGroups.getSelectionModel().getSelectedItem();
             if (selectedItem == null) {
-                showError("未选择", "请先在监听列表中选择一个群聊");
+                showError("\u672a\u9009\u62e9", "\u8bf7\u5148\u5728\u76d1\u542c\u5217\u8868\u4e2d\u9009\u62e9\u4e00\u4e2a\u7fa4\u804a");
                 return;
             }
             String chatName = extractDisplayName(selectedItem);
-            appendLog("📤 正在发送消息到群聊 " + chatName + "...");
+            appendLog("\ud83d\udce4 \u6b63\u5728\u53d1\u9001\u6d88\u606f\u5230\u7fa4\u804a " + chatName + "...");
             btnGroupSendMessage.setDisable(true);
             executor.submit(() -> {
                 String result = WeChatSender.sendTextMessage(chatName, msg);
                 Platform.runLater(() -> {
                     btnGroupSendMessage.setDisable(false);
                     if ("ok".equals(result)) {
-                        appendLog("✅ 消息已发送到群聊 " + chatName);
+                        appendLog("\u2705 \u6d88\u606f\u5df2\u53d1\u9001\u5230\u7fa4\u804a " + chatName);
                         txtGroupSendMessage.clear();
                     } else {
-                        appendLog("❗ 发送失败: " + result);
+                        appendLog("\u2757 \u53d1\u9001\u5931\u8d25: " + result);
                     }
                 });
             });
         });
 
-        panel.getChildren().addAll(title, lblSearch, searchBox, lstSearchResults,
-                controlBox, lblMonitored, lstMonitoredGroups, lblMessages, txtGroupMessages,
-                lblSend, sendBox);
         return panel;
+    }
+
+
+    /**
+     * 自动加载配置中的监听群列表
+     */
+    private void autoLoadMonitorGroups() {
+        List<String> autoGroups = configManager.getConfig().getAutoMonitorGroups();
+        if (autoGroups == null || autoGroups.isEmpty()) return;
+        int count = 0;
+        for (String username : autoGroups) {
+            if (!messageMonitor.isMonitoring(username)) {
+                messageMonitor.startMonitoring(username);
+                chatBuffers.putIfAbsent(username, new StringBuilder());
+                count++;
+            }
+        }
+        if (count > 0) {
+            refreshMonitoredGroupList();
+            final int c = count;
+            Platform.runLater(() -> appendLog("自动监听了 " + c + " 个群聊"));
+        }
     }
 
     /**
@@ -1077,6 +1197,10 @@ public class MainController implements Initializable {
                     lstMonitoredGroups.getItems().add(username);
                 }
             }
+        }
+        // 同步到@提醒规则的源群下拉框
+        if (cbSourceGroupRef != null) {
+            cbSourceGroupRef.getItems().setAll(lstMonitoredGroups.getItems());
         }
     }
 
@@ -1202,6 +1326,10 @@ public class MainController implements Initializable {
                     txtGroupMessages.setScrollTop(Double.MAX_VALUE);
                 });
             }
+            // @提醒规则检测
+            if (atReminderTracker != null && configManager.getConfig().isAtReminderSwitch()) {
+                atReminderTracker.onNewMessage(mm);
+            }
             // 日志始终记录
             Platform.runLater(() -> appendLog("📩 [" + mm.getChatDisplayName() + "] " +
                     mm.getSenderDisplayName() + ": " +
@@ -1257,6 +1385,199 @@ public class MainController implements Initializable {
                 return;
             }
         }
+    }
+
+    /**
+     * 创建@提醒规则面板
+     */
+    private Node createAtReminderPanel() {
+        VBox panel = new VBox(8);
+        panel.setPadding(new Insets(8));
+
+        Label desc = new Label("当源群中有人@目标人时开始计时，若目标人在超时时间内未回复，则在目标群发送提醒消息。");
+        desc.setWrapText(true);
+        desc.getStyleClass().add("sub-title");
+
+        // 总开关（自动保存）
+        CheckBox chkAtSwitch = new CheckBox("启用@提醒规则");
+        chkAtSwitch.setSelected(configManager.getConfig().isAtReminderSwitch());
+        chkAtSwitch.setOnAction(e -> {
+            configManager.getConfig().setAtReminderSwitch(chkAtSwitch.isSelected());
+            configManager.save();
+            appendLog("@提醒总开关: " + (chkAtSwitch.isSelected() ? "开启" : "关闭"));
+            if (atReminderTracker != null) {
+                atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+            }
+        });
+
+        // 规则列表
+        Label lblRules = new Label("规则列表:");
+        lblRules.getStyleClass().add("sub-title");
+        ListView<String> lstRules = new ListView<>();
+        lstRules.setPrefHeight(150);
+        lstRules.setStyle("-fx-border-color: #d0d0d0; -fx-background-color: #f7f7f7;");
+
+        // 规则编辑区域
+        Label lblEdit = new Label("规则配置:");
+        lblEdit.getStyleClass().add("sub-title");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(8);
+        grid.setVgap(8);
+
+        TextField txtRuleName = createTextField("规则名称", 200);
+        ComboBox<String> cbSourceGroup = new ComboBox<>();
+        cbSourceGroup.setPromptText("从监听列表中选择源群");
+        cbSourceGroup.setPrefWidth(300);
+        if (lstMonitoredGroups != null) {
+            cbSourceGroup.getItems().addAll(lstMonitoredGroups.getItems());
+        }
+        cbSourceGroupRef = cbSourceGroup;
+        TextField txtTargetGroup = createTextField("目标群 username", 300);
+        TextField txtTargetPerson = createTextField("被@的目标人昵称", 200);
+        TextField txtTimeout = createTextField("超时分钟数", 80);
+        txtTimeout.setText("10");
+        TextArea txtTemplate = new TextArea();
+        txtTemplate.setPromptText("提醒模板: {person} {sourceGroup} {timeout} {message} {sender}");
+        txtTemplate.setPrefRowCount(3);
+        txtTemplate.setPrefWidth(400);
+        txtTemplate.setText("提醒: {person} 在 {sourceGroup} 被@了，已过{timeout}分钟未回复，原始消息: {message}");
+
+        grid.add(new Label("规则名称:"), 0, 0);
+        grid.add(txtRuleName, 1, 0);
+        grid.add(new Label("源群:"), 0, 1);
+        grid.add(cbSourceGroup, 1, 1);
+        grid.add(new Label("目标群:"), 0, 2);
+        grid.add(txtTargetGroup, 1, 2);
+        grid.add(new Label("目标人:"), 0, 3);
+        grid.add(txtTargetPerson, 1, 3);
+        grid.add(new Label("超时(分钟):"), 0, 4);
+        grid.add(txtTimeout, 1, 4);
+        grid.add(new Label("提醒模板:"), 0, 5);
+        grid.add(txtTemplate, 1, 5);
+
+        // 按钮
+        HBox btnBox = new HBox(8);
+        btnBox.setAlignment(Pos.CENTER_LEFT);
+        Button btnAddRule = new Button("添加规则");
+        btnAddRule.getStyleClass().add("btn-success");
+        Button btnUpdateRule = new Button("更新选中规则");
+        btnUpdateRule.getStyleClass().add("btn-primary");
+        Button btnDeleteRule = new Button("删除选中规则");
+        btnDeleteRule.getStyleClass().add("btn-danger");
+        btnBox.getChildren().addAll(btnAddRule, btnUpdateRule, btnDeleteRule);
+
+        // 刷新规则列表
+        Runnable refreshRules = () -> {
+            lstRules.getItems().clear();
+            for (AtReminderRule rule : configManager.getConfig().getAtReminderRules()) {
+                String status = rule.isEnabled() ? "ON" : "OFF";
+                lstRules.getItems().add("[" + status + "] " + rule.getName()
+                        + " | 源群:" + rule.getSourceGroup()
+                        + " -> 目标群:" + rule.getTargetGroup()
+                        + " | @" + rule.getTargetPerson()
+                        + " | " + rule.getTimeoutMinutes() + "分钟");
+            }
+        };
+        refreshRules.run();
+
+        // 选中规则时填充编辑区
+        lstRules.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
+            int idx2 = lstRules.getSelectionModel().getSelectedIndex();
+            if (idx2 >= 0 && idx2 < configManager.getConfig().getAtReminderRules().size()) {
+                AtReminderRule r = configManager.getConfig().getAtReminderRules().get(idx2);
+                txtRuleName.setText(r.getName());
+                // \u6839\u636e username \u627e\u5230\u5bf9\u5e94\u7684\u4e0b\u62c9\u6846\u9879
+                String srcUname = r.getSourceGroup();
+                for (String item : cbSourceGroup.getItems()) {
+                    if (item.contains(srcUname)) {
+                        cbSourceGroup.setValue(item);
+                        break;
+                    }
+                }
+                txtTargetGroup.setText(r.getTargetGroup());
+                txtTargetPerson.setText(r.getTargetPerson());
+                txtTimeout.setText(String.valueOf(r.getTimeoutMinutes()));
+                txtTemplate.setText(r.getReminderTemplate());
+            }
+        });
+
+        // 添加规则
+        btnAddRule.setOnAction(e -> {
+            try {
+                AtReminderRule rule = new AtReminderRule();
+                rule.setName(txtRuleName.getText().trim());
+                String srcDisplay = cbSourceGroup.getValue();
+                rule.setSourceGroup(srcDisplay != null ? extractUsername(srcDisplay) : "");
+                rule.setTargetGroup(txtTargetGroup.getText().trim());
+                rule.setTargetPerson(txtTargetPerson.getText().trim());
+                rule.setTimeoutMinutes(Integer.parseInt(txtTimeout.getText().trim()));
+                rule.setReminderTemplate(txtTemplate.getText());
+                if (rule.getName().isEmpty() || rule.getSourceGroup().isEmpty()
+                        || rule.getTargetGroup().isEmpty() || rule.getTargetPerson().isEmpty()) {
+                    showError("参数不完整", "请填写所有必填字段");
+                    return;
+                }
+                configManager.getConfig().getAtReminderRules().add(rule);
+                configManager.save();
+                refreshRules.run();
+                appendLog("已添加@提醒规则: " + rule.getName());
+                // 更新tracker
+                if (atReminderTracker != null) {
+                    atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+                }
+            } catch (NumberFormatException ex) {
+                showError("格式错误", "超时分钟数必须是数字");
+            }
+        });
+
+        // 更新选中规则
+        btnUpdateRule.setOnAction(e -> {
+            int idx2 = lstRules.getSelectionModel().getSelectedIndex();
+            if (idx2 < 0) {
+                showError("未选择", "请先选择要更新的规则");
+                return;
+            }
+            try {
+                AtReminderRule rule = configManager.getConfig().getAtReminderRules().get(idx2);
+                rule.setName(txtRuleName.getText().trim());
+                String srcDisplay2 = cbSourceGroup.getValue();
+                rule.setSourceGroup(srcDisplay2 != null ? extractUsername(srcDisplay2) : "");
+                rule.setTargetGroup(txtTargetGroup.getText().trim());
+                rule.setTargetPerson(txtTargetPerson.getText().trim());
+                rule.setTimeoutMinutes(Integer.parseInt(txtTimeout.getText().trim()));
+                rule.setReminderTemplate(txtTemplate.getText());
+                configManager.save();
+                refreshRules.run();
+                appendLog("已更新@提醒规则: " + rule.getName());
+                if (atReminderTracker != null) {
+                    atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+                }
+            } catch (NumberFormatException ex) {
+                showError("格式错误", "超时分钟数必须是数字");
+            }
+        });
+
+        // 删除选中规则
+        btnDeleteRule.setOnAction(e -> {
+            int idx2 = lstRules.getSelectionModel().getSelectedIndex();
+            if (idx2 < 0) {
+                showError("未选择", "请先选择要删除的规则");
+                return;
+            }
+            String name = configManager.getConfig().getAtReminderRules().get(idx2).getName();
+            configManager.getConfig().getAtReminderRules().remove(idx2);
+            configManager.save();
+            refreshRules.run();
+            appendLog("已删除@提醒规则: " + name);
+            if (atReminderTracker != null) {
+                atReminderTracker.updateRules(configManager.getConfig().getAtReminderRules());
+            }
+        });
+
+        panel.getChildren().addAll(desc, chkAtSwitch, lblRules, lstRules,
+                lblEdit, grid, btnBox);
+        return panel;
     }
 
     /**

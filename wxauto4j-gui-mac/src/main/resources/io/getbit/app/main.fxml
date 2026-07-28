@@ -33,13 +33,11 @@
         </VBox>
     </left>
 
-    <!-- 中心内容区 -->
+    <!-- 中心内容区（整体可滚动） -->
     <center>
-        <StackPane fx:id="contentPane" styleClass="content-pane">
-            <padding>
-                <Insets top="10" right="10" bottom="10" left="10"/>
-            </padding>
-        </StackPane>
+        <ScrollPane fx:id="contentScrollPane" fitToWidth="true" hbarPolicy="NEVER" vbarPolicy="AS_NEEDED"
+                    style="-fx-background: #ffffff;">
+        </ScrollPane>
     </center>
 
     <!-- 底部日志面板 -->

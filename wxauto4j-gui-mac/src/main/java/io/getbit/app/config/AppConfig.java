@@ -298,6 +298,19 @@ public class AppConfig {
     /** 群聊拆分回复最多条数 */
     private int groupSplitMaxCount = 4;
 
+    // ==================== 自动监听群聊 ====================
+
+    /** 启动时自动监听的群聊 username 列表 */
+    private List<String> autoMonitorGroups = new ArrayList<>();
+
+    // ==================== @提醒规则 ====================
+
+    /** @提醒未回复追踪规则列表 */
+    private List<AtReminderRule> atReminderRules = new ArrayList<>();
+
+    /** @提醒规则总开关 */
+    private boolean atReminderSwitch = false;
+
     // ==================== Getter / Setter ====================
 
     public String getWxRawKey() { return wxRawKey; }
@@ -521,4 +534,13 @@ public class AppConfig {
 
     public int getGroupSplitMaxCount() { return groupSplitMaxCount; }
     public void setGroupSplitMaxCount(int groupSplitMaxCount) { this.groupSplitMaxCount = groupSplitMaxCount; }
+
+    public List<String> getAutoMonitorGroups() { return autoMonitorGroups; }
+    public void setAutoMonitorGroups(List<String> autoMonitorGroups) { this.autoMonitorGroups = autoMonitorGroups; }
+
+    public List<AtReminderRule> getAtReminderRules() { return atReminderRules; }
+    public void setAtReminderRules(List<AtReminderRule> atReminderRules) { this.atReminderRules = atReminderRules; }
+
+    public boolean isAtReminderSwitch() { return atReminderSwitch; }
+    public void setAtReminderSwitch(boolean atReminderSwitch) { this.atReminderSwitch = atReminderSwitch; }
 }
