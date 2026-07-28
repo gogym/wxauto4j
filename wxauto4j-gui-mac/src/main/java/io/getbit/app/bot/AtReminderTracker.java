@@ -93,7 +93,7 @@ public class AtReminderTracker {
     }
 
     /**
-     * 处理新消息，检测@和回复
+     * 处理新消息，检测@和回复（支持多目标人）
      */
     public void onNewMessage(MessageMonitor.MonitoredMessage mm) {
         String chatUsername = mm.getChatUsername();
@@ -112,37 +112,56 @@ public class AtReminderTracker {
             if (!chatUsername.equals(rule.getSourceGroup())) continue;
 
             final int ruleIndex = i;
+            // 支持逗号分隔的多个目标人
+            String[] persons = splitPersons(rule.getTargetPerson());
 
-            // 检查1：这条消息是否@了目标人
-            if (isAtTargetPerson(content, rule.getTargetPerson())) {
-                log("🔔 [@" + rule.getTargetPerson() + "检测] 在「" + getGroupName(chatUsername)
-                        + "」检测到@" + rule.getTargetPerson() + "的消息: "
-                        + (content.length() > 50 ? content.substring(0, 50) + "..." : content));
+            for (String person : persons) {
+                // 检查1：这条消息是否@了该目标人
+                if (isAtTargetPerson(content, person)) {
+                    log("🔔 [@" + person + "检测] 在「" + getGroupName(chatUsername)
+                            + "」检测到@" + person + "的消息: "
+                            + (content.length() > 50 ? content.substring(0, 50) + "..." : content));
 
-                // 取消该规则下同一目标人的旧提醒（如果有的话）
-                cancelPendingReminder(ruleIndex, rule.getTargetPerson());
+                    // 取消该规则下同一目标人的旧提醒
+                    cancelPendingReminder(ruleIndex, person);
 
-                // 创建新的超时提醒
-                String key = ruleIndex + "|" + rule.getTargetPerson();
-                ScheduledFuture<?> future = scheduler.schedule(() -> {
-                    fireReminder(rule, content, senderDisplay);
-                    pendingReminders.remove(key);
-                }, rule.getTimeoutMinutes(), TimeUnit.MINUTES);
-                pendingReminders.put(key, future);
-            }
+                    // 创建新的超时提醒
+                    String key = ruleIndex + "|" + person;
+                    final String atPerson = person;
+                    ScheduledFuture<?> future = scheduler.schedule(() -> {
+                        fireReminder(rule, atPerson, content, senderDisplay);
+                        pendingReminders.remove(key);
+                    }, rule.getTimeoutMinutes(), TimeUnit.MINUTES);
+                    pendingReminders.put(key, future);
+                }
 
-            // 检查2：这条消息的发送者是否是目标人（即目标人回复了）
-            if (isTargetPersonSpeaking(senderUsername, senderDisplay, rule.getTargetPerson())) {
-                lastSpeakTimes.computeIfAbsent(ruleIndex, k -> new ConcurrentHashMap<>())
-                        .put(rule.getTargetPerson(), mm.getCreateTime());
+                // 检查2：这条消息的发送者是否是该目标人（即目标人回复了）
+                if (isTargetPersonSpeaking(senderUsername, senderDisplay, person)) {
+                    lastSpeakTimes.computeIfAbsent(ruleIndex, k -> new ConcurrentHashMap<>())
+                            .put(person, mm.getCreateTime());
 
-                // 如果目标人发言了，取消该目标人的待触发提醒
-                if (cancelPendingReminder(ruleIndex, rule.getTargetPerson())) {
-                    log("✅ [@" + rule.getTargetPerson() + "已回复] " + senderDisplay
-                            + " 在「" + getGroupName(chatUsername) + "」发言，提醒已取消");
+                    // 如果目标人发言了，取消该目标人的待触发提醒
+                    if (cancelPendingReminder(ruleIndex, person)) {
+                        log("✅ [@" + person + "已回复] " + senderDisplay
+                                + " 在「" + getGroupName(chatUsername) + "」发言，提醒已取消");
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * 拆分逗号分隔的目标人列表（支持中英文逗号）
+     */
+    private String[] splitPersons(String targetPerson) {
+        if (targetPerson == null || targetPerson.isEmpty()) return new String[0];
+        String[] parts = targetPerson.split("[,，]");
+        List<String> result = new ArrayList<>();
+        for (String p : parts) {
+            String trimmed = p.trim();
+            if (!trimmed.isEmpty()) result.add(trimmed);
+        }
+        return result.toArray(new String[0]);
     }
 
     /**
@@ -168,8 +187,9 @@ public class AtReminderTracker {
 
     /**
      * 触发提醒：在目标群发送提醒消息
+     * @param atPerson 被@的具体目标人（单个）
      */
-    private void fireReminder(AtReminderRule rule, String originalMessage, String atSender) {
+    private void fireReminder(AtReminderRule rule, String atPerson, String originalMessage, String atSender) {
         if (messageSender == null) {
             log("❌ [@提醒] 消息发送器未配置，无法发送提醒");
             return;
@@ -180,7 +200,7 @@ public class AtReminderTracker {
 
         // 构建提醒消息
         String msg = rule.getReminderTemplate()
-                .replace("{person}", rule.getTargetPerson())
+                .replace("{person}", atPerson)
                 .replace("{sourceGroup}", sourceGroupName)
                 .replace("{timeout}", String.valueOf(rule.getTimeoutMinutes()))
                 .replace("{message}", originalMessage != null && originalMessage.length() > 100

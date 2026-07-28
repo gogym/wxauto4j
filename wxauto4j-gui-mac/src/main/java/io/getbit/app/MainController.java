@@ -1434,7 +1434,7 @@ public class MainController implements Initializable {
         }
         cbSourceGroupRef = cbSourceGroup;
         TextField txtTargetGroup = createTextField("目标群 username", 300);
-        TextField txtTargetPerson = createTextField("被@的目标人昵称", 200);
+        TextField txtTargetPerson = createTextField("被@的目标人(多人用逗号分隔)", 300);
         TextField txtTimeout = createTextField("超时分钟数", 80);
         txtTimeout.setText("10");
         TextArea txtTemplate = new TextArea();
