@@ -291,7 +291,7 @@ public class MainController implements Initializable {
 
                 Label header = new Label("正在初始化，请稍候...");
                 header.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
-                Label content = new Label("正在启动微信并提取密钥，\n完成后请扫码登录。\n密钥提取成功后将自动关闭此窗口。");
+                Label content = new Label("将通过 Frida 扫描微信进程内存，\n自动提取数据库密钥。\n请确保微信已登录。");
                 content.setWrapText(true);
                 content.setStyle("-fx-font-size: 12px;");
 
@@ -337,43 +337,20 @@ public class MainController implements Initializable {
 
                     if (cancelled[0]) return;
 
-                    // ===== 步骤2：启动微信并提取密钥 =====
+                    // ===== 步骤2：通过内存扫描提取密钥 =====
                     if (cancelled[0]) { resetButton(btnOneClick); return; }
                     Platform.runLater(() -> {
-                        appendLog("🚀 [2/4] 正在通过 Frida 启动微信...");
+                        appendLog("🔍 [2/4] 正在通过 Frida 扫描微信进程内存提取密钥...");
                         if (waitingHeader[0] != null) {
-                            waitingHeader[0].setText("正在启动微信，请稍候...");
-                            waitingContent[0].setText("Frida 正在启动微信，\n微信窗口出现后将提示扫码登录。");
+                            waitingHeader[0].setText("正在扫描微信进程内存...");
+                            waitingContent[0].setText("Frida 将 attach 到运行中的微信进程，\n扫描内存提取数据库密钥。\n请稍候...");
                         }
                     });
 
-                    final boolean[] wechatVisible = {false};
-                    Thread windowWatcher = new Thread(() -> {
-                        for (int i = 0; i < 1800; i++) {
-                            if (cancelled[0]) break;
-                            try { Thread.sleep(1000); } catch (InterruptedException ignored) { break; }
-                            if (isWeChatWindowVisible()) {
-                                wechatVisible[0] = true;
-                                Platform.runLater(() -> {
-                                    appendLog("✅ 微信窗口已打开，请扫码登录！");
-                                    if (waitingHeader[0] != null) {
-                                        waitingHeader[0].setText("请在微信窗口中扫码登录");
-                                        waitingContent[0].setText("微信已启动，请扫码登录...\n密钥提取成功后将自动关闭此窗口。");
-                                    }
-                                });
-                                break;
-                            }
-                        }
-                    }, "wechat-watcher");
-                    windowWatcher.setDaemon(true);
-                    windowWatcher.start();
-
                     WinFridaKeyExtractor extractor = new WinFridaKeyExtractor();
-                    extractor.setTimeout(1800);
+                    extractor.setTimeout(120);
                     String key = extractor.extractKey();
                     String fridaError = extractor.getLastError();
-
-                    windowWatcher.interrupt();
 
                     if (cancelled[0]) return;
 
@@ -398,7 +375,7 @@ public class MainController implements Initializable {
                     Platform.runLater(() -> {
                         txtKey.setText(key);
                         lblDbKeyStatus.setText("当前状态: ✅ 已提取 (" + key.substring(0, 8) + "...)");
-                        appendLog("✅ [2/5] 密钥提取成功: " + key.substring(0, 8) + "...");
+                        appendLog("✅ [2/4] 密钥提取成功: " + key.substring(0, 8) + "...");
                     });
 
                     // ===== 步骤3：保存密钥到配置 =====
@@ -1338,21 +1315,18 @@ public class MainController implements Initializable {
      */
     private boolean isWeChatWindowVisible() {
         try {
+            // 微信 4.x (Weixin): 通过进程名查找可见主窗口
+            // Qt 应用 MainWindowHandle 可能为0，进程存在即视为已启动
             String script =
-                    "Add-Type @\"\n" +
-                    "using System;\n" +
-                    "using System.Runtime.InteropServices;\n" +
-                    "public class WinAPI3 {\n" +
-                    "    [DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);\n" +
-                    "    [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);\n" +
+                    "$procs = Get-Process -Name 'Weixin' -ErrorAction SilentlyContinue\n" +
+                    "if ($procs) {\n" +
+                    "    foreach ($p in $procs) {\n" +
+                    "        if ($p.MainWindowHandle -ne [IntPtr]::Zero) { 'true'; exit }\n" +
+                    "    }\n" +
+                    "    # Qt 应用 MainWindowHandle 可能为0，进程存在即视为已启动\n" +
+                    "    'true'; exit\n" +
                     "}\n" +
-                    "\"@\n" +
-                    "$hwnd = [WinAPI3]::FindWindow(\"WeChatMainWndForPC\", $null)\n" +
-                    "if ($hwnd -ne [IntPtr]::Zero -and [WinAPI3]::IsWindowVisible($hwnd)) {\n" +
-                    "    Write-Output \"true\"\n" +
-                    "} else {\n" +
-                    "    Write-Output \"false\"\n" +
-                    "}";
+                    "'false'";
 
             ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", script);
             pb.redirectErrorStream(true);
@@ -1371,20 +1345,20 @@ public class MainController implements Initializable {
      * 在 Windows 上查找微信可执行文件路径
      */
     private static String findWeChatWindows() {
-        // 常见安装路径
+        // 微信 4.x 常见安装路径
         String[] candidates = {
-                System.getenv("ProgramFiles") + "\\Tencent\\WeChat\\WeChat.exe",
-                System.getenv("ProgramFiles(x86)") + "\\Tencent\\WeChat\\WeChat.exe",
-                System.getProperty("user.home") + "\\AppData\\Local\\Tencent\\WeChat\\WeChat.exe",
-                System.getProperty("user.home") + "\\AppData\\Roaming\\Tencent\\WeChat\\WeChat.exe",
-                "C:\\Program Files\\Tencent\\WeChat\\WeChat.exe",
-                "C:\\Program Files (x86)\\Tencent\\WeChat\\WeChat.exe",
-                "D:\\Program Files\\Tencent\\WeChat\\WeChat.exe",
-                "D:\\Program Files (x86)\\Tencent\\WeChat\\WeChat.exe",
-                "E:\\Program Files\\Tencent\\WeChat\\WeChat.exe",
+                System.getenv("ProgramFiles") + "\\Tencent\\Weixin\\Weixin.exe",
+                System.getenv("ProgramFiles(x86)") + "\\Tencent\\Weixin\\Weixin.exe",
+                "C:\\Program Files\\Tencent\\Weixin\\Weixin.exe",
+                "C:\\Program Files (x86)\\Tencent\\Weixin\\Weixin.exe",
+                "D:\\Program Files\\Tencent\\Weixin\\Weixin.exe",
+                "D:\\Program Files (x86)\\Tencent\\Weixin\\Weixin.exe",
+                "E:\\Program Files\\Tencent\\Weixin\\Weixin.exe",
         };
         for (String path : candidates) {
-            if (path != null && new java.io.File(path).exists()) {
+            boolean exists = path != null && new java.io.File(path).exists();
+            System.out.println("[findWeChatWindows] 检查: " + path + " -> " + exists);
+            if (exists) {
                 return path;
             }
         }
@@ -1392,14 +1366,14 @@ public class MainController implements Initializable {
         // 通过注册表查找
         try {
             ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive",
-                    "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WeChat' -ErrorAction SilentlyContinue).InstallLocation");
+                    "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Weixin' -ErrorAction SilentlyContinue).InstallLocation");
             Process p = pb.start();
             try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
                 String line = reader.readLine();
                 p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
                 if (line != null && !line.trim().isEmpty()) {
-                    String installDir = line.trim();
-                    String exePath = installDir + "\\WeChat.exe";
+                    String installDir = line.trim().replace("\"", "");
+                    String exePath = installDir + "\\Weixin.exe";
                     if (new java.io.File(exePath).exists()) {
                         return exePath;
                     }
@@ -1409,7 +1383,7 @@ public class MainController implements Initializable {
 
         // 通过 where 命令查找
         try {
-            ProcessBuilder pb = new ProcessBuilder("where", "WeChat.exe");
+            ProcessBuilder pb = new ProcessBuilder("where", "Weixin.exe");
             Process p = pb.start();
             try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
                 String line = reader.readLine();
@@ -1420,6 +1394,27 @@ public class MainController implements Initializable {
             }
         } catch (Exception ignored) {}
 
+        // 通过运行中的 Weixin 进程反查路径（最可靠的兜底方式）
+        try {
+            ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", "(Get-Process Weixin -ErrorAction SilentlyContinue | Select-Object -First 1).Path");
+            Process p = pb.start();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
+                String line = reader.readLine();
+                p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                if (line != null && !line.trim().isEmpty()) {
+                    String exePath = line.trim().replace("\"", "");
+                    System.out.println("[findWeChatWindows] 从运行进程找到: " + exePath);
+                    if (new java.io.File(exePath).exists()) {
+                        return exePath;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[findWeChatWindows] 进程查找失败: " + e.getMessage());
+        }
+
+        System.out.println("[findWeChatWindows] 所有方式均未找到微信");
         return null;
     }
 }
